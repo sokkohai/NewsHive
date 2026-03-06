@@ -1,0 +1,57 @@
+﻿# ==============================================================
+# newshive – Technische Quellen-Konfiguration (Beispiel)
+# ==============================================================
+# Kopieren Sie diese Datei zu sources.yaml und passen Sie
+# die Quellen für Ihre Umgebung an.
+#
+# Diese Datei wird normalerweise nur vom Administrator bearbeitet.
+# ==============================================================
+
+# ------------------------------------------------------------------
+# E-Mail-Ordner (Outlook)
+# ------------------------------------------------------------------
+email_folders:
+  - folder_path: Inbox/Newsletters
+    archive_folder: Inbox/processed_newsletter
+
+
+# ------------------------------------------------------------------
+# Web-Quellen
+# ------------------------------------------------------------------
+# Verfügbare discovery_method-Werte: rss | static | browser | sitemap
+# Verfügbare fetch_method-Werte:     static | browser
+
+web_sources:
+
+  # Beispiel: Kanzlei-Blog (Browser-Rendering nötig)
+  - url: https://www.law-firm-example.com/insights
+    categories: [CCCI]
+    listings_type: linked
+    discovery_method: browser
+    fetch_method: static
+    extraction_rules:
+      include_patterns: [/insights/]
+      exclude_patterns: [/kontakt, /impressum, /datenschutz]
+    date_extraction_pattern:
+      css_selectors: [time[datetime], .date]
+      regex_patterns: ['\\d{2}\\.\\d{2}\\.\\d{4}']
+      date_format: DD.MM.YYYY
+
+  # Beispiel: RSS-Feed
+  - url: https://www.legal-news-example.com/strafrecht
+    rss_feed_url: https://www.legal-news-example.com/rss/feed.xml
+    categories: [CCCI]
+    listings_type: linked
+    discovery_method: rss
+    fetch_method: static
+    rss_date_extraction: feed_fields
+    extraction_rules:
+      include_patterns: [/nachrichten/, /hintergruende/]
+      exclude_patterns: [/tag/, /kategorie/]
+
+  # Beispiel: Statische Seite
+  - url: https://legal-news.example.com
+    categories: [CCCI]
+    listings_type: linked
+    discovery_method: sitemap
+    sitemap_url: https://legal-news.example.com/sitemap_articles.xml

@@ -1,0 +1,99 @@
+test_results.txt
+
+# Environment and Configuration Files
+.env
+.env.local
+.env.*.local
+config.json
+config.yaml
+sources.yaml
+
+
+# Artlice Storage
+state_store.json
+results.json
+data
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+.venv
+
+# IDE and Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Testing and Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Type Checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Linting
+.ruff_cache/
+
+# Cache Files
+.cache/
+*.cache
+.chromedriver-cache/
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# Build and Distribution
+.eggs/
+*.egg
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary Files
+*.tmp
+*.log
+honeyscraper.log*
+pip-log.txt
+pip-delete-this-directory.txt
+
+# IDE Cache
+*.code-workspace
+*.pylintrc
+.python-version

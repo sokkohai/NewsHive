@@ -1,0 +1,5 @@
+[flake8]
+ignore = W503,W391
+# Set a high max line length to avoid issues even if E501 is not fully ignored in some contexts,
+# but 'ignore = E501' should be sufficient.
+max-line-length = 100

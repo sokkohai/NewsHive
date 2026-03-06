@@ -1,0 +1,223 @@
+﻿# ==============================================================
+# newshive – Benutzereinstellungen (Beispiel)
+# ==============================================================
+# Kopieren Sie diese Datei zu config.yaml und passen Sie
+# die Werte für Ihre Umgebung an.
+#
+# Technische Quellen-Einstellungen befinden sich in sources.yaml.
+# ==============================================================
+
+pipeline_version: "2.0"
+
+
+# --------------------------------------------------------------
+# Allgemeine Pipeline-Einstellungen
+# --------------------------------------------------------------
+
+# Wie viele Tage alte Artikel sollen noch berücksichtigt werden?
+# Artikel, die älter sind, werden ignoriert.
+article_max_age_days: 4
+
+# Bonus-Regel: Wenn eine Durchsuchung/Anklage (D1 ≥ 2) UND
+# Führungspersonal betroffen ist (D2 ≥ 2), werden +2 Punkte addiert.
+relevance_scoring_bonus_rule_enabled: false
+
+
+# --------------------------------------------------------------
+# Inhaltskategorien
+# --------------------------------------------------------------
+# Jede Kategorie definiert:
+#   name             – interner Name (muss mit den Quelleneinstellungen übereinstimmen)
+#   keywords         – Artikel mit mindestens einem dieser Begriffe werden
+#                      dieser Kategorie zugeordnet
+#   relevance_schema – (optional) KI-Bewertungsschema mit 5 Dimensionen (0–3 je Dimension)
+#                      Ohne Schema werden CCCI-Standardwerte verwendet.
+#
+# Schlüsselwörter: Groß-/Kleinschreibung wird ignoriert.
+# Teilwörter zählen: "Betrug" trifft auch "Betrugsverdacht".
+
+categories:
+  - name: CCCI
+    keywords:
+      # --- Strafrecht & Ermittlungen ---
+      - Interne Untersuchung
+      - Internal Investigation
+      - Ermittlungsverfahren
+      - Ermittlungen der Staatsanwaltschaft
+      - Ermittlungen der Behörde
+      - Steuerhinterziehung
+      - Betrug
+      - Durchsuchung
+      - Geldwäsche
+      - AML
+      - Anti-Money Laundering
+      - AMLA
+      - Korruption
+      - Anti corruption
+      - Anti corruption enforcement
+      - Bribery
+      - foreign bribery enforcement
+      - DOJ
+      - Department of Justice
+      - PNF
+      - Parquet National Financier
+      - OAG
+      - Office of the Attorney General of Switzerland
+      - Serious Fraud Office
+      - SFO
+      # --- Compliance ---
+      - Compliance-Verstoß
+      - Compliance-Risiken
+      - Whistleblowing
+      - Hinweisgeberschutzgesetz
+      - Geldwäsche-Prävention
+      - Wettbewerbsverstöße
+      - Marktmanipulation
+      - Insiderhandel
+      # --- ESG & Regulatorik ---
+      - ESG
+      - CSR
+      - ESRS
+      - CSRD
+      - CSDDD
+      - Nachhaltigkeitsberichterstattung
+      - ESG-Reporting
+      - Lieferkettengesetz
+      - Sorgfaltspflichten
+      - Lieferkettenmanagement
+      - EU-Taxonomie
+      - SFDR
+      - ESG-Fonds
+      - Impact Investing
+      - Nachhaltigkeitsfonds
+      - Sustainable Finance
+      - Anlageberatung
+      - MiFID II
+      - MiFID-Compliance
+      - Greenwashing
+      - Nachhaltigkeitsprüfung
+      - Nachhaltigkeitsstrategie
+      - Nachhaltigkeitsrisiken
+      - Scope 1, Scope 2, Scope 3 Emission
+      - Emission
+      - Omnibus
+      - green claims
+      - environmental claims
+      - sustainability claims
+      - CMA
+      - Competition & Markets Authority
+      - regulatory alerts
+      - guidance
+
+    # ----------------------------------------------------------
+    # KI-Bewertungsschema
+    # ----------------------------------------------------------
+    # Definiert, wie die KI Artikel anhand von 5 Dimensionen bewertet.
+    # Jede Dimension hat Scores von 0 bis 3.
+    # Gesamtpunktzahl 0–15: Niedrig (0–4), Mittel (5–9), Hoch (10–15)
+    # Ein Artikel muss Hoch eingestuft sein, um durchzukommen.
+    #
+    # Sie können Labels und Score-Beschreibungen auf Ihr Team anpassen.
+    # Die fünf Dimensionskennzeichner (d1_enforcement bis d5_mandate)
+    # dürfen NICHT umbenannt werden.
+    relevance_schema:
+      schema_id: ccci-v1
+      display_name: Corporate Crime, Compliance & Investigations
+
+      # Schwellenwerte für die Gesamteinstufung (Standard: 10 für Hoch, 5 für Mittel)
+      thresholds:
+        hoch: 10
+        mittel: 5
+
+      # System-Anweisung an die KI (legt den Bewertungskontext fest)
+      system_message: >-
+        Du bewertest die Relevanz eines Nachrichtenartikels für ein Corporate Crime, Compliance & Investigations (CCCI) Team einer Wirtschaftskanzlei.
+        Maßgeblich ist ausschließlich die unternehmensbezogene straf-, ordnungswidrigkeiten-, aufsichts- oder compliance-rechtliche Relevanz.
+        Gatekeeper-Regel: Artikel ohne klaren Unternehmens-, Organ- oder konkreten Compliance-Bezug dürfen nicht als „Hoch“ eingestuft werden; 
+        selbst dann nicht, wenn es sich um ein Strafverfahren, eine Durchsuchung oder eine prominente Anklage handelt.
+        Politische, gesellschaftliche oder prominentenbezogene Strafverfahren ohne Unternehmensbezug sind regelmäßig als „Niedrig“ oder höchstens „Mittel“ zu bewerten.
+        Die Bewertung erfolgt strikt aus Sicht des Mandatspotenzials und des Risikos für Unternehmen oder deren Organe.
+        Antworte ausschließlich mit validem JSON.
+        Kein Fließtext außerhalb des JSON.
+
+      dimensions:
+        # D1: Enforcement nur mit Unternehmensbezug relevant
+        d1_enforcement:
+          label: Unternehmensbezogene Enforcement-Intensität
+          question: Wie intensiv greift staatliche Strafverfolgung oder Aufsicht GEGEN EIN UNTERNEHMEN oder dessen Organe ein?
+          scoring_rule: >
+            Ohne Unternehmensbezug maximal 1 Punkt.
+          scores:
+            "0": Keine Maßnahme
+            "1": Gesetzesinitiative / politische Ankündigung / allgemeine Debatte
+            "2": Ermittlungen, Verdacht, behördliche Prüfung gegen Unternehmen or Organ
+            "3": Durchsuchung, Anklage, Bußgeld, Sanktion oder behördliche Zwangsmaßnahme gegen Unternehmen oder Organ
+
+        # D2: Nur echte Unternehmensorgane zählen
+        d2_organ:
+          label: Organ- & Management-Exposition
+          question: Ist die Leitungsebene eines Unternehmens persönlich betroffen?
+          scoring_rule: >
+            Politiker, Beamte, Royals oder sonstige Amtsträger zählen NICHT als Unternehmensorgane.
+          scores:
+            "0": Keine Unternehmensführung betroffen
+            "1": Führungsebene indirekt erwähnt
+            "2": Geschäftsführung/Leitungsebene genannt, aber nicht beschuldigt
+            "3": Vorstand, CEO, Geschäftsführer, General Counsel oder Compliance Officer direkt betroffen/beschuldigt
+
+        # D3: Systemische Compliance-Relevanz für Unternehmen
+        d3_compliance:
+          label: Unternehmensbezogene Compliance-Relevanz
+          question: Entsteht für Unternehmen ein strukturelles Compliance-Risiko?
+          scores:
+            "0": Reiner Einzelfall ohne Compliance-Bezug
+            "1": Operative oder individuelle Unregelmäßigkeit
+            "2": Mögliche Schwäche in internen Kontrollen / Organisationspflichten
+            "3": Strukturelles Governance-, Aufsichts- oder Organisationsversagen mit Signalwirkung für Unternehmen
+
+        # D4: Regulatorischer Impact für Unternehmen
+        d4_regulatory:
+          label: Unternehmensrelevanter Regulierungs-Impact
+          question: Entsteht neues oder verschärftes Recht mit unmittelbaren Pflichten für Unternehmen?
+          scores:
+            "0": Kein regulatorischer Bezug
+            "1": Bestehende Norm wird routinemäßig angewendet
+            "2": Neue behördliche Auslegung, Leitlinie oder spürbare Verschärfung bestehender Pflichten
+            "3": Neues Gesetz, neues Sanktionsregime oder substanziell neue Unternehmenspflichten
+
+        # D5: Streng an realem Mandatspotenzial ausrichten
+        d5_mandate:
+          label: Konkretes Mandatspotenzial (CCCI)
+          question: Würde ein realistischer Mandant deshalb unsere CCCI-Praxis kontaktieren?
+          scoring_rule: >
+            Ohne konkreten Unternehmensbezug maximal 1 Punkt.
+          scores:
+            "0": Kein realistisches Mandat
+            "1": Theoretisch denkbare Beratung
+            "2": Typische Compliance- oder Regulierungsberatung wahrscheinlich
+            "3": Sehr wahrscheinlich/akut (Ermittlungsmandat, interne Untersuchung, Selbstanzeige, Durchsuchung, Bußgeldrisiko oder unmittelbarer Handlungsbedarf)
+
+      # Mögliche Praxisbereiche, denen der Artikel zugeordnet wird
+      practice_areas:
+        - Wirtschafts- und Steuerstrafrecht
+        - Interne Untersuchungen
+        - Compliance & Regulatorik
+        - Sonstiges
+
+  - name: ESG & Sustainability Regulations
+    keywords:
+      - ESG
+      - CSR
+      - ESRS
+      - CSRD
+      - CSDDD
+      - Nachhaltigkeitsberichterstattung
+      - Lieferkettengesetz
+      - Sorgfaltspflichten
+      - EU-Taxonomie
+      - SFDR
+      - Nachhaltigkeitsfonds
+      - Greenwashing
+      - Nachhaltigkeitsstrategie
+      - Scope 1, Scope 2, Scope 3 Emission
+      - Emission
