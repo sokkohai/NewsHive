@@ -1,6 +1,6 @@
 # NewsHive
 
-Specification-driven news discovery and enrichment pipeline. Scrapes web sources and email folders, extracts article content, and generates AI-powered German summaries with relevance scoring.
+News discovery and enrichment pipeline. Scrapes web sources and email folders, extracts article content, and generates AI-powered German summaries with relevance scoring.
 
 ## Features
 
