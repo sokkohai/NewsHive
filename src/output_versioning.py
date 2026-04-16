@@ -14,7 +14,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,23 @@ class ResultsVersioning:
         return f"{ResultsVersioning.FILE_PREFIX}{iso_str}{ResultsVersioning.FILE_SUFFIX}"
 
     @staticmethod
-    def get_archive_path(filename: str | None = None) -> Path:
+    def get_daily_filename(execution_timestamp: str | datetime | None = None) -> str:
+        """Generate a date-only filename for daily aggregated results."""
+        if execution_timestamp is None:
+            dt = datetime.now(timezone.utc)
+        elif isinstance(execution_timestamp, str):
+            dt = datetime.fromisoformat(execution_timestamp.replace("Z", "+00:00"))
+        else:
+            dt = execution_timestamp
+
+        date_str = dt.strftime("%Y-%m-%d")
+        return f"{ResultsVersioning.FILE_PREFIX}{date_str}{ResultsVersioning.FILE_SUFFIX}"
+
+    @staticmethod
+    def get_archive_path(
+        filename: str | None = None,
+        archive_dir: str | Path | None = None,
+    ) -> Path:
         """Get full path to archive directory or specific file.
 
         Args:
@@ -62,13 +78,63 @@ class ResultsVersioning:
         Returns:
             Path object for archive directory or file.
         """
-        archive_path = Path(ResultsVersioning.ARCHIVE_DIR)
+        archive_path = Path(archive_dir) if archive_dir is not None else Path(ResultsVersioning.ARCHIVE_DIR)
         if filename:
             return archive_path / filename
         return archive_path
 
     @staticmethod
-    def write_results(items: list[dict[str, Any]], execution_timestamp: str) -> Path | None:
+    def write_daily_results(
+        items: list[dict[str, Any]],
+        execution_timestamp: str,
+        archive_dir: str | Path | None = None,
+    ) -> Path | None:
+        """Write or update the daily aggregated results file in the archive."""
+        try:
+            archive_path = ResultsVersioning.get_archive_path(archive_dir=archive_dir)
+            archive_path.mkdir(parents=True, exist_ok=True)
+
+            filename = ResultsVersioning.get_daily_filename(execution_timestamp)
+            filepath = archive_path / filename
+
+            merged_items: list[dict[str, Any]] = []
+            if filepath.exists():
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                    merged_items = existing.get("items", [])
+                except Exception as e:
+                    logger.warning(f"  Could not read existing daily file for merging: {e}")
+
+            existing_ids = {item.get("id") for item in merged_items}
+            new_items = [item for item in items if item.get("id") not in existing_ids]
+            merged_items.extend(new_items)
+
+            output_doc = {
+                "execution_timestamp": execution_timestamp,
+                "item_count": len(merged_items),
+                "items": merged_items,
+            }
+
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(output_doc, f, indent=2, ensure_ascii=False)
+
+            action = "Updated" if new_items else "No new items added to"
+            logger.info(
+                f"  {action} daily results file {filepath} "
+                f"({len(new_items)} new, {len(merged_items)} total)"
+            )
+            return filepath
+        except Exception as e:
+            logger.error(f"  Failed to write daily results file: {e}")
+            return None
+
+    @staticmethod
+    def write_results(
+        items: list[dict[str, Any]],
+        execution_timestamp: str,
+        archive_dir: str | Path | None = None,
+    ) -> Path | None:
         """Write results to timestamped file in archive.
 
         Per specs/core/OUTPUT.md:
@@ -86,12 +152,12 @@ class ResultsVersioning:
         """
         try:
             # Create archive directory
-            archive_dir = ResultsVersioning.get_archive_path()
-            archive_dir.mkdir(parents=True, exist_ok=True)
+            archive_path = ResultsVersioning.get_archive_path(archive_dir=archive_dir)
+            archive_path.mkdir(parents=True, exist_ok=True)
 
             # Generate timestamped filename
             filename = ResultsVersioning.get_timestamp_filename(execution_timestamp)
-            filepath = archive_dir / filename
+            filepath = archive_path / filename
 
             # Prepare output document
             output_doc = {
@@ -112,7 +178,10 @@ class ResultsVersioning:
             return None
 
     @staticmethod
-    def cleanup_old_results(retention_days: int = RETENTION_DAYS) -> int:
+    def cleanup_old_results(
+        retention_days: int = RETENTION_DAYS,
+        archive_dir: str | Path | None = None,
+    ) -> int:
         """Delete result files older than retention period.
 
         Per specs/core/OUTPUT.md:
@@ -128,7 +197,7 @@ class ResultsVersioning:
             Number of files deleted
         """
         try:
-            archive_dir = ResultsVersioning.get_archive_path()
+            archive_dir = ResultsVersioning.get_archive_path(archive_dir=archive_dir)
 
             if not archive_dir.exists():
                 logger.debug(f"Archive directory does not exist: {archive_dir}")
@@ -151,8 +220,10 @@ class ResultsVersioning:
                         len(ResultsVersioning.FILE_PREFIX) : -len(ResultsVersioning.FILE_SUFFIX)
                     ]
 
-                    # Parse timestamp (e.g., "2026-01-16T143025Z")
-                    file_datetime = datetime.strptime(timestamp_str, "%Y-%m-%dT%H%M%SZ")
+                    if "T" in timestamp_str:
+                        file_datetime = datetime.strptime(timestamp_str, "%Y-%m-%dT%H%M%SZ")
+                    else:
+                        file_datetime = datetime.strptime(timestamp_str, "%Y-%m-%d")
                     file_datetime = file_datetime.replace(tzinfo=timezone.utc)
 
                     # Check if file is older than retention period
@@ -253,7 +324,7 @@ class ResultsVersioning:
                     continue
 
             # Sort by datetime (newest first)
-            results.sort(key=lambda x: x["datetime"], reverse=True)
+            results.sort(key=lambda x: cast(datetime, x["datetime"]), reverse=True)
 
             # Apply limit
             results = results[:limit]

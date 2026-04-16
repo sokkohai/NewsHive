@@ -16,9 +16,10 @@ from typing import Any
 
 from .categorization import Categorizer
 from .config import Configuration, RelevanceSchema
+from .few_shot_examples import FewShotExample, FewShotExampleStore
 from .llm_client import call_llm
 from .models import ContentItem
-from .relevance_scorer import RelevanceScorer, classify_relevance
+from .relevance_scorer import RelevanceScorer, classify_relevance, normalize_practice_area
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,8 @@ Antworte AUSSCHLIESSLICH mit einem validen JSON-Objekt. Kein Markdown, kein erkl
         llm_model: str,
         llm_api_key: str,
         llm_api_url: str | None = None,
+        few_shot_examples: list[FewShotExample] | None = None,
+        max_few_shot_examples: int = 15,
     ):
         """Initialize unified enricher.
 
@@ -60,6 +63,8 @@ Antworte AUSSCHLIESSLICH mit einem validen JSON-Objekt. Kein Markdown, kein erkl
         self.api_key = llm_api_key
         self.api_url = llm_api_url  # only required for provider='custom'
         self.categorizer = Categorizer(config)
+        self.few_shot_examples = few_shot_examples or []
+        self.max_few_shot_examples = max_few_shot_examples
 
         # Relevance scoring is now integrated into the single LLM call,
         # but we reuse the helper methods from RelevanceScorer if available
@@ -534,11 +539,9 @@ Artikeltext:
 
                 # 5. Extract & Validate
                 # Map JSON fields to ContentItem
-                item.title = str(result.get("title", "")).strip() or item.title # Fallback to original if empty
+                item.title = str(result.get("title", "")).strip() or item.title
                 item.summary = str(result.get("summary", "")).strip()
-                item.cleaned_title = item.title # In optimized flow, title IS the cleaned title
-                item.cleaned_summary = item.summary # In optimized flow, summary IS the cleaned summary
-                
+
                 # Relevance Data
                 dims = result.get("relevance_dimensions", {})
                 total_score = 0
@@ -559,14 +562,15 @@ Artikeltext:
                     
                     # Levels logic
                     item.relevance_level = classify_relevance(
-                        total_score, 
+                        total_score,
                         custom_thresholds=relevance_schema.thresholds if relevance_schema else None
                     )
 
-                if "practice_area" in result and result["practice_area"] in PRACTICE_AREAS:
-                     item.relevance_practice_area = result["practice_area"]
-                else:
-                     item.relevance_practice_area = result.get("practice_area", "Sonstiges")
+                normalized_practice_area = normalize_practice_area(
+                    result.get("practice_area"),
+                    set(PRACTICE_AREAS),
+                )
+                item.relevance_practice_area = normalized_practice_area or "Sonstiges"
 
                 quality_score = result.get("quality_score", 1.0)
                 item.validation_status = "PASS" if quality_score > 0.3 else "WARN"
@@ -574,7 +578,7 @@ Artikeltext:
                 # 6. Filter Low/Medium Score
                 # Only keep "Hoch"
                 if item.relevance_level != "Hoch":
-                     failed_items.append((item.source_key, f"filtered: {item.relevance_level}"))
+                     failed_items.append((item.source_key, f"relevance_level_too_low: {item.relevance_level}"))
                      logger.info(f"Filtered non-high level: {item.source_key} ({item.relevance_level}, score: {item.relevance_score})")
                      continue
 
@@ -620,6 +624,18 @@ Artikeltext:
 
         practice_area_options = "|".join(practice_areas)
 
+        few_shot_block = FewShotExampleStore.render_for_prompt(
+            self.few_shot_examples,
+            max_examples=self.max_few_shot_examples,
+        )
+        few_shot_section = ""
+        if few_shot_block:
+            few_shot_section = (
+                "\n\nREFERENZBEISPIELE (Few-Shot):\n"
+                "Nutze diese Beispiele als Bewertungsanker (ähnliche Fälle konsistent bewerten).\n"
+                f"{few_shot_block}"
+            )
+
         return f"""Analysiere den folgenden Artikel und antworte AUSSCHLIESSLICH mit einem validen JSON-Objekt.
 
 AUFGABEN:
@@ -633,6 +649,7 @@ DIMENSIONEN:
 
 PRAXISBEREICHE:
 {practice_area_options}
+{few_shot_section}
 
 ARTIKEL:
 {content}

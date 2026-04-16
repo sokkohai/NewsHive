@@ -29,6 +29,7 @@ from .models import ContentItem
 from .language_detection import detect_language
 from .listings_extractor import get_listings_extractor, ListingArticle
 from .config import Configuration
+from .pattern_extractors import get_extractor_for_source
 
 # Try to import Playwright
 try:
@@ -1055,6 +1056,19 @@ class Extractor:
                 
                 # Detect source language from extracted content
                 item.language_detected = detect_language(content)
+
+                if self.config and self.config.web_sources:
+                    for source in self.config.web_sources:
+                        if self._source_matches_url(url, source):
+                            extractor = get_extractor_for_source(source)
+                            if extractor:
+                                pattern = extractor.extract(content)
+                                if pattern:
+                                    logger.info(f"Extracted pattern: {pattern} from {item.source_key}")
+                                    item.keywords = [pattern]
+                                else:
+                                    logger.debug(f"No pattern found in {item.source_key}")
+                            break
                 
                 # NEW: Conditional date filtering (only if published_at was "unknown" in Discovery)
                 # Per updated EXTRACTION.md spec: Only extract date if Discovery returned "unknown"

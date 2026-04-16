@@ -194,6 +194,51 @@ class Envelope:
             result["failed_items"] = [item.to_dict() for item in self.failed_items]
         return result
 
+    def to_structured_webhook_dict(self, practice_areas_order: list[str] | None = None) -> dict[str, Any]:
+        """Build structured webhook payload grouped by category and practice area."""
+        from collections import defaultdict
+
+        grouped: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+
+        for item in self.items:
+            practice_area = item.relevance_practice_area or "Sonstiges"
+            article: dict[str, Any] = {
+                "title": item.title,
+                "url": item.source_url or "",
+                "date": item.published_at if item.published_at and item.published_at != "unknown" else item.extracted_at,
+                "summary": item.summary,
+                "keywords": item.keywords or [],
+            }
+            category_name = item.categories[0] if item.categories else "Sonstiges"
+            grouped[category_name][practice_area].append(article)
+
+        categories = []
+        for cat_name, pa_dict in grouped.items():
+            if practice_areas_order:
+                order_index: dict[str, int] = {pa: i for i, pa in enumerate(practice_areas_order)}
+                sorted_pa_names = sorted(
+                    pa_dict.keys(),
+                    key=lambda pa: (order_index.get(pa, len(practice_areas_order)), order_index.get(pa, 0)),
+                )
+            else:
+                sorted_pa_names = list(pa_dict.keys())
+
+            practice_areas_list = [
+                {"name": pa_name, "articles": pa_dict[pa_name]}
+                for pa_name in sorted_pa_names
+            ]
+
+            categories.append({
+                "name": cat_name,
+                "practice_areas": practice_areas_list,
+            })
+
+        return {
+            "generated_at": self.generated_at,
+            "pipeline_version": self.pipeline_version,
+            "categories": categories,
+        }
+
     def to_json(self) -> str:
         """Convert Envelope to JSON string."""
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
@@ -208,8 +253,9 @@ class StateStoreRecord:
 
     source_key: str
     processed_at: str  # ISO 8601 - when the article was processed
-    status: str  # "success", "filtered", "extraction_failed", "summarization_failed", "categorization_failed", "enrichment_failed"
+    status: str  # "success", "filtered", "extraction_failed", "summarization_failed", "categorization_failed", "enrichment_failed", "cap_dropped", "discovery_dropped"
     article_date: str | None = None  # ISO 8601 - publication date of the article itself
+    reason: str | None = None
 
     VALID_STATUSES: ClassVar = {
         "success",
@@ -218,6 +264,8 @@ class StateStoreRecord:
         "summarization_failed",
         "categorization_failed",
         "enrichment_failed",
+        "cap_dropped",
+        "discovery_dropped",
     }
 
     def __post_init__(self) -> None:
@@ -237,6 +285,8 @@ class StateStoreRecord:
         }
         if self.article_date is not None:
             result["article_date"] = self.article_date
+        if self.reason is not None:
+            result["reason"] = self.reason
         return result
 
 
@@ -288,6 +338,7 @@ class StateStore:
                 processed_at=record_data["processed_at"],
                 status=record_data["status"],
                 article_date=record_data.get("article_date"),
+                reason=record_data.get("reason"),
             )
             store.add_record(record)
 

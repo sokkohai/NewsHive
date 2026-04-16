@@ -48,6 +48,24 @@ PRACTICE_AREAS = frozenset({
     "Sonstiges",
 })
 
+
+def normalize_practice_area(value: Any, allowed_values: set[str] | None = None) -> str | None:
+    """Normalize raw practice-area value to the active allow-list."""
+    if not isinstance(value, str):
+        return None
+
+    candidate = value.strip()
+    if not candidate:
+        return None
+
+    if "|" in candidate:
+        candidate = candidate.split("|", 1)[0].strip()
+
+    effective_allowed = allowed_values if allowed_values is not None else set(PRACTICE_AREAS)
+    if candidate in effective_allowed:
+        return candidate
+    return None
+
 SYSTEM_MESSAGE = (
     "Du bewertest die Relevanz eines Nachrichtenartikels für ein Corporate Crime, "
     "Compliance & Investigations (CCCI) Team einer Wirtschaftskanzlei. "

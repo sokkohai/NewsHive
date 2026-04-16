@@ -74,7 +74,7 @@ class StateStoreManager:
 
     def add_filtered(self, source_key: str, processed_at: str, article_date: str | None = None) -> None:
         """Record an item that was filtered out (too old, no keywords match, etc.)
-        
+
         This is NOT a failure - it's expected filtering behavior per spec.
         """
         record = StateStoreRecord(
@@ -82,6 +82,40 @@ class StateStoreManager:
             processed_at=processed_at,
             status="filtered",
             article_date=article_date,
+        )
+        self.store.add_record(record)
+
+    def add_cap_dropped(
+        self,
+        source_key: str,
+        processed_at: str,
+        article_date: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Record an item dropped by output caps."""
+        record = StateStoreRecord(
+            source_key=source_key,
+            processed_at=processed_at,
+            status="cap_dropped",
+            article_date=article_date,
+            reason=reason,
+        )
+        self.store.add_record(record)
+
+    def add_discovery_dropped(
+        self,
+        source_key: str,
+        processed_at: str,
+        article_date: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Record an item dropped during freshness filtering in discovery."""
+        record = StateStoreRecord(
+            source_key=source_key,
+            processed_at=processed_at,
+            status="discovery_dropped",
+            article_date=article_date,
+            reason=reason,
         )
         self.store.add_record(record)
 

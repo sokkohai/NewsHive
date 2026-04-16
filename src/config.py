@@ -21,6 +21,107 @@ class ConfigError(ValueError):
     pass
 
 
+def _parse_env_bool(var_name: str, default: bool) -> bool:
+    """Parse boolean environment variables with strict, explicit values."""
+    raw = os.getenv(var_name)
+    if raw is None:
+        return default
+
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+
+    raise ConfigError(
+        f"Invalid {var_name} value: '{raw}'. Expected one of: true/false, 1/0, yes/no, on/off"
+    )
+
+
+def _parse_env_int(var_name: str, default: int, min_val: int = 1, max_val: int = 1024) -> int:
+    """Parse integer environment variable with range validation."""
+    raw = os.getenv(var_name)
+    if raw is None:
+        return default
+
+    try:
+        value = int(raw.strip())
+    except ValueError as exc:
+        raise ConfigError(
+            f"Invalid {var_name} value: '{raw}'. Expected an integer."
+        ) from exc
+
+    if not (min_val <= value <= max_val):
+        raise ConfigError(
+            f"Invalid {var_name} value: {value}. Must be between {min_val} and {max_val}."
+        )
+
+    return value
+
+
+def _parse_env_optional_int(
+    var_name: str, *, min_val: int = 0, max_val: int = 100
+) -> int | None:
+    """Parse optional integer environment variable with range validation."""
+    raw = os.getenv(var_name)
+    if raw is None:
+        return None
+
+    try:
+        value = int(raw.strip())
+    except ValueError as exc:
+        raise ConfigError(
+            f"Invalid {var_name} value: '{raw}'. Expected an integer."
+        ) from exc
+
+    if not (min_val <= value <= max_val):
+        raise ConfigError(
+            f"Invalid {var_name} value: {value}. Must be between {min_val} and {max_val}."
+        )
+
+    return value
+
+
+def _parse_env_category_thresholds(var_name: str) -> dict[str, int] | None:
+    """Parse optional category-specific threshold map from JSON env var."""
+    raw = os.getenv(var_name)
+    if raw is None:
+        return None
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(
+            f"Invalid {var_name} value: expected JSON object (e.g. {{\"CCCI\": 85}})."
+        ) from exc
+
+    if not isinstance(parsed, dict):
+        raise ConfigError(
+            f"Invalid {var_name} value: expected JSON object (category->threshold)."
+        )
+
+    result: dict[str, int] = {}
+    for category, threshold in parsed.items():
+        if not isinstance(category, str) or not category.strip():
+            raise ConfigError(
+                f"Invalid {var_name} key: category name must be a non-empty string."
+            )
+
+        if not isinstance(threshold, int):
+            raise ConfigError(
+                f"Invalid {var_name} value for category '{category}': expected integer threshold."
+            )
+
+        if not (0 <= threshold <= 100):
+            raise ConfigError(
+                f"Invalid {var_name} value for category '{category}': {threshold}. Must be between 0 and 100."
+            )
+
+        result[category] = threshold
+
+    return result
+
+
 @dataclass
 class Category:
     """Represents a category definition with name and keywords for content matching."""
@@ -40,7 +141,7 @@ class Category:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert Category to dictionary."""
-        result = {"name": self.name, "keywords": self.keywords}
+        result: dict[str, Any] = {"name": self.name, "keywords": self.keywords}
         if self.relevance_schema is not None:
             result["relevance_schema"] = self.relevance_schema.to_dict()
         return result
@@ -96,6 +197,13 @@ class RelevanceSchema:
         "d3_compliance",
         "d4_regulatory",
         "d5_mandate",
+    }
+    LEGACY_REQUIRED_DIMENSION_KEYS = {
+        "d1_enforcement",
+        "d2_personen",
+        "d3_compliance",
+        "d4_regulatory",
+        "d5_inlandsbezug",
     }
     REQUIRED_SCORE_KEYS = {"0", "1", "2", "3"}
 
@@ -259,6 +367,8 @@ class WebSource:
     rss_date_extraction: str = "both"  # "feed_fields", "url_pattern", or "both"
     browser_actions: list[dict[str, Any]] | None = None
     item_selector: str | None = None  # Selector for finding item containers (optional)
+    pattern_extraction: dict[str, Any] | None = None
+    disable_keyword_filtering: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "WebSource":
@@ -295,6 +405,8 @@ class WebSource:
             rss_date_extraction=rss_date_extraction,
             browser_actions=data.get("browser_actions"),
             item_selector=data.get("item_selector"),
+            pattern_extraction=data.get("pattern_extraction"),
+            disable_keyword_filtering=data.get("disable_keyword_filtering", False),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -326,6 +438,10 @@ class WebSource:
             result["browser_actions"] = self.browser_actions
         if self.item_selector:
             result["item_selector"] = self.item_selector
+        if self.pattern_extraction:
+            result["pattern_extraction"] = self.pattern_extraction
+        if self.disable_keyword_filtering:
+            result["disable_keyword_filtering"] = self.disable_keyword_filtering
         return result
 
 
@@ -436,6 +552,45 @@ class ArticlePreparationConfig:
 
 
 @dataclass
+class LLMDeduplicationConfig:
+    """Configuration for LLM-based deduplication after relevance scoring."""
+
+    enabled: bool = True
+    similarity_threshold: int = 85
+    similarity_threshold_by_category: dict[str, int] | None = None
+    keep_strategy: str = "highest_score"
+    batch_size: int = 100
+    verbose_logging: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "LLMDeduplicationConfig":
+        """Create LLMDeduplicationConfig from dictionary."""
+        if data is None:
+            return cls()
+        return cls(
+            enabled=data.get("enabled", True),
+            similarity_threshold=data.get("similarity_threshold", 85),
+            similarity_threshold_by_category=data.get("similarity_threshold_by_category"),
+            keep_strategy=data.get("keep_strategy", "highest_score"),
+            batch_size=data.get("batch_size", 100),
+            verbose_logging=data.get("verbose_logging", False),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert LLMDeduplicationConfig to dictionary."""
+        result = {
+            "enabled": self.enabled,
+            "similarity_threshold": self.similarity_threshold,
+            "keep_strategy": self.keep_strategy,
+            "batch_size": self.batch_size,
+            "verbose_logging": self.verbose_logging,
+        }
+        if self.similarity_threshold_by_category:
+            result["similarity_threshold_by_category"] = self.similarity_threshold_by_category
+        return result
+
+
+@dataclass
 class Configuration:
     """Configuration for the newshive pipeline.
 
@@ -449,6 +604,9 @@ class Configuration:
     email_folders: list[EmailFolder]
     categories: list[Category]
     webhook_url: str | None = None
+    webhook_url_structured: str | None = None
+    webhook_enabled: bool = True
+    webhook_structured_enabled: bool = True
     quality_verification: QualityVerification | None = None
     listings_enabled: bool = True  # Phase 3: Enable listings extraction by default
     article_max_age_days: int = 3  # Maximum age of articles in days (default: 3 days)
@@ -456,6 +614,13 @@ class Configuration:
     relevance_scoring_enabled: bool = True  # Enable 5-dimension relevance scoring (RELEVANCE_SCORING.md)
     relevance_scoring_bonus_rule_enabled: bool = False  # Enable Enforcement×Organ bonus (+2 if D1≥2 AND D2≥2)
     article_text_preparation: ArticlePreparationConfig | None = None
+    relevance_threshold: int = 5
+    practice_areas_order: list[str] | None = None
+    max_articles_per_practice_area: int | None = None
+    max_articles_total: int | None = None
+    llm_deduplication: "LLMDeduplicationConfig | None" = None
+    llm_deduplication_stage_enabled: bool = False
+    enrichment_max_workers: int = 4
 
     def _validate_relevance_schema(
         self,
@@ -471,13 +636,17 @@ class Configuration:
             return
 
         dimension_keys = set(schema.dimensions.keys())
-        missing_dimensions = RelevanceSchema.REQUIRED_DIMENSION_KEYS - dimension_keys
+        required_dimension_keys = RelevanceSchema.REQUIRED_DIMENSION_KEYS
+        if dimension_keys == RelevanceSchema.LEGACY_REQUIRED_DIMENSION_KEYS:
+            required_dimension_keys = RelevanceSchema.LEGACY_REQUIRED_DIMENSION_KEYS
+
+        missing_dimensions = required_dimension_keys - dimension_keys
         if missing_dimensions:
             errors.append(
                 f"categories[{category_name}].relevance_schema missing dimensions: {sorted(missing_dimensions)}"
             )
 
-        unknown_dimensions = dimension_keys - RelevanceSchema.REQUIRED_DIMENSION_KEYS
+        unknown_dimensions = dimension_keys - required_dimension_keys
         if unknown_dimensions:
             errors.append(
                 f"categories[{category_name}].relevance_schema has unknown dimensions: {sorted(unknown_dimensions)}"
@@ -706,12 +875,93 @@ class Configuration:
             data.get("quality_verification")
         )
 
+        llm_dedup_config = LLMDeduplicationConfig.from_dict(
+            data.get("llm_deduplication")
+        )
+
+        env_similarity_threshold = _parse_env_optional_int(
+            "LLM_DEDUPLICATION_SIMILARITY_THRESHOLD", min_val=0, max_val=100
+        )
+        if env_similarity_threshold is not None:
+            llm_dedup_config.similarity_threshold = env_similarity_threshold
+
+        env_keep_strategy = os.getenv("LLM_DEDUPLICATION_KEEP_STRATEGY")
+        if env_keep_strategy is not None:
+            llm_dedup_config.keep_strategy = env_keep_strategy.strip()
+
+        env_batch_size = _parse_env_optional_int(
+            "LLM_DEDUPLICATION_BATCH_SIZE", min_val=0, max_val=10000
+        )
+        if env_batch_size is not None:
+            llm_dedup_config.batch_size = env_batch_size
+
+        env_verbose_logging = os.getenv("LLM_DEDUPLICATION_VERBOSE_LOGGING")
+        if env_verbose_logging is not None:
+            llm_dedup_config.verbose_logging = _parse_env_bool(
+                "LLM_DEDUPLICATION_VERBOSE_LOGGING", llm_dedup_config.verbose_logging
+            )
+
+        env_llm_dedup_enabled = os.getenv("LLM_DEDUPLICATION_ENABLED")
+        if env_llm_dedup_enabled is not None:
+            llm_dedup_config.enabled = _parse_env_bool(
+                "LLM_DEDUPLICATION_ENABLED", llm_dedup_config.enabled
+            )
+
+        env_category_thresholds = _parse_env_category_thresholds(
+            "LLM_DEDUPLICATION_SIMILARITY_THRESHOLD_BY_CATEGORY"
+        )
+        if env_category_thresholds is not None:
+            llm_dedup_config.similarity_threshold_by_category = env_category_thresholds
+
+        try:
+            relevance_threshold_str = os.getenv("RELEVANCE_THRESHOLD", "5").strip()
+            relevance_threshold = int(relevance_threshold_str)
+            if relevance_threshold < 0:
+                raise ValueError("RELEVANCE_THRESHOLD must be >= 0")
+        except ValueError as exc:
+            raise ConfigError(f"Invalid RELEVANCE_THRESHOLD value: {exc}") from exc
+
+        max_articles_per_practice_area: int | None = None
+        env_max_pa = os.getenv("MAX_ARTICLES_PER_PRACTICE_AREA")
+        if env_max_pa is not None:
+            try:
+                max_articles_per_practice_area = int(env_max_pa.strip())
+                if max_articles_per_practice_area < 1:
+                    raise ValueError("MAX_ARTICLES_PER_PRACTICE_AREA must be >= 1")
+            except ValueError as exc:
+                raise ConfigError(f"Invalid MAX_ARTICLES_PER_PRACTICE_AREA value: {exc}") from exc
+        else:
+            raw_pa = data.get("max_articles_per_practice_area")
+            if raw_pa is not None:
+                if not isinstance(raw_pa, int) or raw_pa < 1:
+                    raise ConfigError("max_articles_per_practice_area must be a positive integer")
+                max_articles_per_practice_area = raw_pa
+
+        max_articles_total: int | None = None
+        env_max_total = os.getenv("MAX_ARTICLES_TOTAL")
+        if env_max_total is not None:
+            try:
+                max_articles_total = int(env_max_total.strip())
+                if max_articles_total < 1:
+                    raise ValueError("MAX_ARTICLES_TOTAL must be >= 1")
+            except ValueError as exc:
+                raise ConfigError(f"Invalid MAX_ARTICLES_TOTAL value: {exc}") from exc
+        else:
+            raw_total = data.get("max_articles_total")
+            if raw_total is not None:
+                if not isinstance(raw_total, int) or raw_total < 1:
+                    raise ConfigError("max_articles_total must be a positive integer")
+                max_articles_total = raw_total
+
         config = cls(
             pipeline_version=data.get("pipeline_version", ""),
             web_sources=web_sources,
             email_folders=email_folders,
             categories=categories,
             webhook_url=os.getenv("WEBHOOK_URL") or data.get("webhook_url"),
+            webhook_url_structured=os.getenv("WEBHOOK_URL_STRUCTURED") or data.get("webhook_url_structured"),
+            webhook_enabled=_parse_env_bool("WEBHOOK_ENABLED", True),
+            webhook_structured_enabled=_parse_env_bool("WEBHOOK_STRUCTURED_ENABLED", True),
             quality_verification=quality_verification,
             # Phase 3: Listings configuration
             listings_enabled=data.get("listings_enabled", True),
@@ -721,6 +971,17 @@ class Configuration:
             relevance_scoring_bonus_rule_enabled=data.get("relevance_scoring_bonus_rule_enabled", False),
             article_text_preparation=ArticlePreparationConfig.from_dict(
                 data.get("article_text_preparation")
+            ),
+            relevance_threshold=relevance_threshold,
+            practice_areas_order=data.get("practice_areas_order"),
+            max_articles_per_practice_area=max_articles_per_practice_area,
+            max_articles_total=max_articles_total,
+            llm_deduplication=llm_dedup_config,
+            llm_deduplication_stage_enabled=_parse_env_bool(
+                "LLM_DEDUPLICATION_STAGE_ENABLED", False
+            ),
+            enrichment_max_workers=_parse_env_int(
+                "ENRICHMENT_MAX_WORKERS", default=4, min_val=1, max_val=32
             ),
         )
 
@@ -737,10 +998,25 @@ class Configuration:
         }
         if self.webhook_url:
             result["webhook_url"] = self.webhook_url
+        if self.webhook_url_structured:
+            result["webhook_url_structured"] = self.webhook_url_structured
+        result["webhook_enabled"] = self.webhook_enabled
+        result["webhook_structured_enabled"] = self.webhook_structured_enabled
         if self.quality_verification and self.quality_verification.enabled:
             result["quality_verification"] = self.quality_verification.to_dict()
         if self.article_text_preparation is not None:
-             result["article_text_preparation"] = self.article_text_preparation.to_dict()
+            result["article_text_preparation"] = self.article_text_preparation.to_dict()
+        result["relevance_threshold"] = self.relevance_threshold
+        if self.practice_areas_order:
+            result["practice_areas_order"] = self.practice_areas_order
+        if self.max_articles_per_practice_area is not None:
+            result["max_articles_per_practice_area"] = self.max_articles_per_practice_area
+        if self.max_articles_total is not None:
+            result["max_articles_total"] = self.max_articles_total
+        if self.llm_deduplication is not None:
+            result["llm_deduplication"] = self.llm_deduplication.to_dict()
+        result["llm_deduplication_stage_enabled"] = self.llm_deduplication_stage_enabled
+        result["enrichment_max_workers"] = self.enrichment_max_workers
         return result
 
 
@@ -769,7 +1045,7 @@ class ConfigLoader:
         """Read a JSON or YAML file and return the parsed dictionary."""
         with open(path, encoding="utf-8") as f:
             if path.suffix in (".yaml", ".yml"):
-                import yaml  # pyyaml – always available (listed in dependencies)
+                import yaml  # type: ignore[import-untyped]
                 result = yaml.safe_load(f)
                 if result is None:
                     return {}
@@ -806,6 +1082,11 @@ class ConfigLoader:
             json.JSONDecodeError: If a .json file contains invalid JSON.
             yaml.YAMLError: If a .yaml file contains invalid YAML.
         """
+        if config_path is None:
+            env_config = os.getenv("NEWSHIVE_CONFIG") or os.getenv("HONEYSCRAPER_CONFIG")
+            if env_config:
+                config_path = Path(env_config)
+
         if config_path is None:
             # Auto-detect: prefer YAML, fall back to JSON
             for candidate in ConfigLoader._YAML_CANDIDATES:

@@ -19,6 +19,8 @@ from .article_preparation import ArticlePreparer
 from .categorization import Categorizer
 from .discovery import Discoverer
 from .extraction import Extractor
+from .few_shot_examples import FewShotExampleStore
+from .llm_deduplicator import LLMDeduplicator
 from .models import ContentItem, Envelope, FailedItem
 from .output_versioning import ResultsVersioning
 from .state_store import StateStoreManager
@@ -76,8 +78,17 @@ class Pipeline:
             self.config = self._filter_config_by_site(site_filter)
             logger.info(f"Site filter applied: processing only '{site_filter}'")
 
+        logger.info(
+            "Relevance threshold configured: minimum %d articles with Mittel/Hoch relevance "
+            "(fills with top-score Niedrig items if needed)",
+            self.config.relevance_threshold,
+        )
+
         # Store results path
         self.results_path = results_path or "./data/results.json"
+        self.results_archive_dir = str(Path(self.results_path).parent / "results_archive")
+        self.examples_path = Path("./article_llm_examples.yaml")
+        self.examples_max_in_prompt = 15
 
         # Load/initialize state store
         state_path = Path(state_store_path) if state_store_path else None
@@ -96,24 +107,60 @@ class Pipeline:
             config=self.config,
         )
         self.categorizer = Categorizer(self.config)
+        self._pending_discovery_drops: list[tuple[ContentItem, str]] = []
 
         # Initialize unified enricher if LLM is configured
         try:
             import os
             llm_provider, llm_model, llm_api_key = ConfigLoader.get_llm_config()
             llm_api_url = os.getenv("LLM_API_URL")
+            few_shot_examples = self._load_examples()
             self.unified_enricher: UnifiedEnricher | None = UnifiedEnricher(
                 self.config,
                 llm_provider,
                 llm_model,
                 llm_api_key,
                 llm_api_url,
+                few_shot_examples=few_shot_examples,
+                max_few_shot_examples=self.examples_max_in_prompt,
             )
             logger.info(f"Initialized Unified Enricher: {llm_provider}/{llm_model}")
         except ValueError as e:
             logger.warning(f"Unified enrichment disabled: {e}")
             logger.warning("Summarization will be skipped (no LLM configured)")
             self.unified_enricher = None
+
+        self.llm_deduplicator: LLMDeduplicator | None = None
+        try:
+            import os
+            llm_provider, llm_model, llm_api_key = ConfigLoader.get_llm_config()
+            llm_api_url = os.getenv("LLM_API_URL")
+            if self.config.llm_deduplication_stage_enabled:
+                self.llm_deduplicator = LLMDeduplicator(
+                    self.config,
+                    llm_provider,
+                    llm_model,
+                    llm_api_key,
+                    llm_api_url,
+                )
+                logger.info(f"Initialized LLM Deduplicator: {llm_provider}/{llm_model}")
+            else:
+                logger.info("LLM deduplication stage disabled (config/env)")
+        except ValueError:
+            pass
+        except Exception as e:
+            logger.warning(f"LLM deduplication initialization failed: {e}. Deduplication will be skipped.")
+            self.llm_deduplicator = None
+
+    def _load_examples(self) -> list:
+        """Load curated few-shot examples from article_llm_examples.yaml."""
+        store = FewShotExampleStore(self.examples_path)
+        examples = store.load()
+        if examples:
+            logger.info("Loaded %d few-shot examples from %s", len(examples), self.examples_path)
+            return examples
+        logger.info("No few-shot examples found in %s", self.examples_path)
+        return []
 
     def _filter_config_by_site(self, site_filter: str) -> Configuration:
         """Filter configuration to process only a specific web source.
@@ -153,6 +200,234 @@ class Pipeline:
         # Create new configuration with filtered sources
         return replace(self.config, web_sources=matched_sources)
 
+    def _apply_output_caps(
+        self,
+        items: list[ContentItem],
+        execution_timestamp: str | None = None,
+    ) -> list[ContentItem]:
+        """Apply per-practice-area and global total caps, keeping highest-scored articles."""
+        max_pa = self.config.max_articles_per_practice_area
+        max_total = self.config.max_articles_total
+
+        if not hasattr(self, "stats_cap_dropped"):
+            self.stats_cap_dropped = 0
+
+        if max_pa is None and max_total is None:
+            return items
+
+        def _score_sort_key(item: ContentItem) -> tuple[int, str]:
+            score = item.relevance_score
+            numeric = int(score) if isinstance(score, (int, float)) and score is not None else -1
+            return (-numeric, item.source_key)
+
+        result: list[ContentItem] = items
+        cap_ts = execution_timestamp or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        if max_pa is not None:
+            from collections import defaultdict
+            grouped: dict[tuple[str, str], list[ContentItem]] = defaultdict(list)
+            for item in result:
+                category = item.categories[0] if item.categories else "Sonstiges"
+                practice_area = item.relevance_practice_area or "Sonstiges"
+                grouped[(category, practice_area)].append(item)
+
+            capped: list[ContentItem] = []
+            for (cat, pa), group in grouped.items():
+                sorted_group = sorted(group, key=_score_sort_key)
+                kept = sorted_group[:max_pa]
+                dropped_items = sorted_group[max_pa:]
+                dropped = len(sorted_group) - len(kept)
+                if dropped:
+                    self.stats_cap_dropped += dropped
+                    logger.info(
+                        f"  [CAP] Practice-area cap ({max_pa}): dropped {dropped} article(s) "
+                        f"from '{cat}' / '{pa}'"
+                    )
+                    if hasattr(self, "state_store"):
+                        for dropped_item in dropped_items:
+                            article_date = (
+                                dropped_item.published_at
+                                if getattr(dropped_item, "published_at", None) not in (None, "", "unknown")
+                                else None
+                            )
+                            self.state_store.add_cap_dropped(
+                                dropped_item.source_key,
+                                cap_ts,
+                                article_date=article_date,
+                                reason="cap_practice_area",
+                            )
+                capped.extend(kept)
+            result = capped
+
+        if max_total is not None and len(result) > max_total:
+            sorted_result = sorted(result, key=_score_sort_key)
+            dropped_items = sorted_result[max_total:]
+            dropped_total = len(sorted_result) - max_total
+            self.stats_cap_dropped += dropped_total
+            result = sorted_result[:max_total]
+            logger.info(
+                f"  [CAP] Global cap ({max_total}): dropped {dropped_total} article(s) in total"
+            )
+            if hasattr(self, "state_store"):
+                for dropped_item in dropped_items:
+                    article_date = (
+                        dropped_item.published_at
+                        if getattr(dropped_item, "published_at", None) not in (None, "", "unknown")
+                        else None
+                    )
+                    self.state_store.add_cap_dropped(
+                        dropped_item.source_key,
+                        cap_ts,
+                        article_date=article_date,
+                        reason="cap_global",
+                    )
+
+        return result
+
+    def _apply_minimum_processed_fallback(
+        self,
+        enriched_items: list[ContentItem],
+        extracted_items: list[ContentItem],
+        enrichment_filtered: list[tuple[str, str]],
+        minimum_items: int = 3,
+    ) -> tuple[list[ContentItem], list[tuple[str, str]]]:
+        """Fill processed items from low-relevance filtered items up to minimum."""
+        if len(enriched_items) >= minimum_items or not enrichment_filtered:
+            return enriched_items, enrichment_filtered
+
+        extracted_by_key = {item.source_key: item for item in extracted_items}
+        existing_keys = {item.source_key for item in enriched_items}
+        seen_keys: set[str] = set()
+        candidates: list[ContentItem] = []
+
+        for source_key, reason in enrichment_filtered:
+            normalized_reason = reason.strip().lower().removeprefix("filtered:").strip()
+            normalized_reason = normalized_reason.removeprefix("relevance_level_too_low:").strip()
+            if normalized_reason != "niedrig":
+                continue
+            if source_key in existing_keys or source_key in seen_keys:
+                continue
+
+            candidate = extracted_by_key.get(source_key)
+            if candidate is None:
+                continue
+
+            seen_keys.add(source_key)
+            candidates.append(candidate)
+
+        if not candidates:
+            return enriched_items, enrichment_filtered
+
+        def _sort_key(item: ContentItem) -> tuple[int, int, str]:
+            score = item.relevance_score
+            has_numeric_score = isinstance(score, (int, float))
+            numeric_score = int(score) if has_numeric_score and score is not None else -1
+            return (0 if has_numeric_score else 1, -numeric_score, item.source_key)
+
+        candidates.sort(key=_sort_key)
+
+        needed = minimum_items - len(enriched_items)
+        promoted_items = candidates[:needed]
+        if not promoted_items:
+            return enriched_items, enrichment_filtered
+
+        promoted_keys = {item.source_key for item in promoted_items}
+        remaining_filtered = [
+            (source_key, reason)
+            for source_key, reason in enrichment_filtered
+            if source_key not in promoted_keys
+        ]
+
+        logger.info(
+            "  Fallback activated: promoted %d low-relevance items to reach %d processed",
+            len(promoted_items),
+            minimum_items,
+        )
+
+        final_count = len(enriched_items) + len(promoted_items)
+        if final_count < minimum_items:
+            logger.warning(
+                f"Relevance threshold {minimum_items} could not be reached. "
+                f"Only {final_count} articles available (need {minimum_items - final_count} more)."
+            )
+
+        return enriched_items + promoted_items, remaining_filtered
+
+    def _apply_preparation_fallback(
+        self,
+        prepared_items: list[ContentItem],
+        preparation_failures: list[tuple[ContentItem, str | None]],
+        minimum_items: int = 3,
+    ) -> tuple[list[ContentItem], list[tuple[ContentItem, str | None]]]:
+        """Promote preparation-filtered items when too few items remain."""
+        if len(prepared_items) >= minimum_items or not preparation_failures:
+            return prepared_items, preparation_failures
+
+        candidates = [
+            (item, reason)
+            for item, reason in preparation_failures
+            if reason == "article_text_insufficient" and (item.content or "").strip()
+        ]
+        if not candidates:
+            return prepared_items, preparation_failures
+
+        candidates.sort(
+            key=lambda pair: (
+                -len(pair[0].content or ""),
+                pair[0].source_key,
+            )
+        )
+
+        needed = minimum_items - len(prepared_items)
+        promoted = [item for item, _ in candidates[:needed]]
+        if not promoted:
+            return prepared_items, preparation_failures
+
+        promoted_keys = {item.source_key for item in promoted}
+        remaining_failures = [
+            pair
+            for pair in preparation_failures
+            if pair[0].source_key not in promoted_keys
+        ]
+
+        logger.info(
+            "  Preparation fallback activated: promoted %d article(s) to reach %d candidates",
+            len(promoted),
+            minimum_items,
+        )
+
+        return prepared_items + promoted, remaining_failures
+
+    def _log_execution_summary(self) -> None:
+        """Log a compact execution summary for final pipeline outcome."""
+        logger.info("\n" + "=" * 80)
+        logger.info("EXECUTION SUMMARY")
+        logger.info("=" * 80)
+        logger.info(f"Processed: {self.stats_processed}")
+        logger.info(f"Failed:    {self.stats_failed}")
+        logger.info(f"Filtered:  {self.stats_filtered}")
+        logger.info(f"Deduped:   {self.stats_deduped}")
+        logger.info(f"Keyword-filtered: {self.stats_keyword_filtered}")
+        logger.info(f"Cap-dropped:      {self.stats_cap_dropped}")
+        logger.info("=" * 80)
+
+    def _record_discovery_drops(self, execution_timestamp: str) -> int:
+        """Persist pending discovery drops to the state store."""
+        pending_drops = getattr(self, "_pending_discovery_drops", [])
+        persisted = 0
+        for item, reason in pending_drops:
+            article_date = item.published_at if getattr(item, "published_at", None) not in (None, "", "unknown") else None
+            self.state_store.add_discovery_dropped(
+                item.source_key,
+                execution_timestamp,
+                article_date=article_date,
+                reason=reason,
+            )
+            persisted += 1
+
+        self._pending_discovery_drops = []
+        return persisted
+
     def run(self) -> Envelope:
         """Execute the complete pipeline.
 
@@ -169,6 +444,9 @@ class Pipeline:
         self.stats_processed = 0
         self.stats_failed = 0
         self.stats_filtered = 0
+        self.stats_deduped = 0
+        self.stats_keyword_filtered = 0
+        self.stats_cap_dropped = 0
 
         logger.info("=" * 80)
         logger.info("newshive PIPELINE EXECUTION")
@@ -259,6 +537,12 @@ class Pipeline:
                         # result contains failure reason
                         preparation_failures.append((item, result))
                 
+                prepared_items, preparation_failures = self._apply_preparation_fallback(
+                    prepared_items,
+                    preparation_failures,
+                    minimum_items=self.config.relevance_threshold,
+                )
+
                 logger.info(
                     f"  Prepared {len(prepared_items)} items "
                     f"({len(preparation_failures)} filtered)"
@@ -269,18 +553,19 @@ class Pipeline:
                 # Log preparation failures
                 if preparation_failures:
                     logger.info(f"  Failed preparation:")
-                    for item, reason in preparation_failures:
-                        logger.info(f"    x {item.source_key} ({reason})")
+                    for item, failure_reason in preparation_failures:
+                        logger.info(f"    x {item.source_key} ({failure_reason})")
                 
                 # Use updated list for next stage
                 extracted_items = prepared_items
                 
                 # Record preparation failures as skipped/filtered
                 execution_timestamp_str = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                for item, reason in preparation_failures:
-                     reason_str = reason or "Unknown preparation failure"
-                     logger.info(f"  Filtered (preparation): {item.source_key} - {reason_str}")
-                     self.state_store.add_filtered(item.source_key, reason_str, execution_timestamp_str)
+                for item, failure_reason in preparation_failures:
+                    reason_str = failure_reason or "Unknown preparation failure"
+                    logger.info(f"  Filtered (preparation): {item.source_key} - {reason_str}")
+                    article_date = item.published_at if hasattr(item, 'published_at') else None
+                    self.state_store.add_filtered(item.source_key, execution_timestamp_str, article_date=article_date)
             
             if not extracted_items:
                  logger.info("  No items passed extraction & preparation. Pipeline complete.")
@@ -300,7 +585,7 @@ class Pipeline:
 
             # Build article_dates map from new_items for extraction failures
 
-            article_dates = {
+            article_dates: dict[str, str | None] = {
                 item.source_key: item.published_at 
                 for item in new_items if hasattr(item, 'published_at')
             }
@@ -345,8 +630,17 @@ class Pipeline:
                 for key, reason in enrichment_results:
                     if reason.startswith("filtered:"):
                         enrichment_filtered.append((key, reason.replace("filtered: ", "")))
+                    elif reason.startswith("relevance_level_too_low:"):
+                        enrichment_filtered.append((key, reason.replace("relevance_level_too_low: ", "")))
                     else:
                         enrichment_failures.append((key, reason))
+
+                enriched_items, enrichment_filtered = self._apply_minimum_processed_fallback(
+                    enriched_items,
+                    extracted_items,
+                    enrichment_filtered,
+                    minimum_items=self.config.relevance_threshold,
+                )
                 
                 # Track stats
                 self.stats_failed += len(enrichment_failures)
@@ -370,12 +664,12 @@ class Pipeline:
                     for key, reason in enrichment_failures:
                         logger.info(f"    x {key} ({reason})")
                 # Build article_dates map from extracted_items for enrichment failures
-                article_dates = {
+                enrichment_article_dates: dict[str, str | None] = {
                     item.source_key: item.published_at 
                     for item in extracted_items if hasattr(item, 'published_at')
                 }
                 self._record_failures(
-                    enrichment_failures, "enrichment_failed", envelope, article_dates=article_dates
+                    enrichment_failures, "enrichment_failed", envelope, article_dates=enrichment_article_dates
                 )
                 # Record filtered items in state store
                 for key, reason in enrichment_filtered:
@@ -397,9 +691,9 @@ class Pipeline:
                     logger.info(f"  Filtered (categorization):")
                 
                 # Record filtered items in state store
-                for item, reason in categorization_filtered:
-                    source_key = item.source_key if hasattr(item, 'source_key') else item[0] if isinstance(item, tuple) else item
-                    article_date = item.published_at if hasattr(item, 'published_at') else None
+                for filtered_item, reason in categorization_filtered:
+                    source_key = filtered_item.source_key if hasattr(filtered_item, 'source_key') else filtered_item[0] if isinstance(filtered_item, tuple) else str(filtered_item)
+                    article_date = filtered_item.published_at if hasattr(filtered_item, 'published_at') else None
                     logger.info(f"    - {source_key} ({reason})")
                     self.state_store.add_filtered(source_key, execution_timestamp, article_date=article_date)
                 enriched_items = categorized_items
@@ -421,6 +715,34 @@ class Pipeline:
                 logger.info("=" * 80)
                 
                 return envelope
+
+            # Stage 4.6: LLM-based Deduplication (similarity detection)
+            if (
+                self.config.llm_deduplication_stage_enabled
+                and self.llm_deduplicator is not None
+                and len(enriched_items) > 1
+            ):
+                logger.info("\n[STAGE 4.6] LLM-based Deduplication (Similarity Detection)")
+                before_llm_dedup = len(enriched_items)
+                enriched_items = self.llm_deduplicator.deduplicate(enriched_items)
+                after_llm_dedup = len(enriched_items)
+                if before_llm_dedup > after_llm_dedup:
+                    deduped_count = before_llm_dedup - after_llm_dedup
+                    self.stats_deduped += deduped_count
+                    logger.info(
+                        f"  Deduplicated {deduped_count} similar items "
+                        f"({after_llm_dedup} unique items remain)"
+                    )
+                else:
+                    logger.info(f"  No similar duplicates found ({after_llm_dedup} items)")
+            elif not self.config.llm_deduplication_stage_enabled:
+                logger.info("\n[STAGE 4.6] LLM-based Deduplication (disabled)")
+
+            # Stage 4.7: Apply output caps (per practice area + global total)
+            enriched_items = self._apply_output_caps(
+                enriched_items,
+                execution_timestamp=execution_timestamp,
+            )
 
             # Stage 5: Output & State Update
             logger.info("\n[STAGE 5] Output & State Update")
@@ -456,7 +778,7 @@ class Pipeline:
         # Log discovery breakdown by source
         if candidates:
             from collections import defaultdict
-            sources = defaultdict(int)
+            sources: dict[str, int] = defaultdict(int)
             for item in candidates:
                 # Extract domain from source_key/source_url
                 domain = "unknown"
@@ -477,6 +799,10 @@ class Pipeline:
                 f"  Dropped {dropped} items after discovery: "
                 f"{stale_count} stale, {undated_count} undated (kept {len(filtered)})"
             )
+            discovery_ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            persisted_count = self._record_discovery_drops(discovery_ts)
+            if persisted_count:
+                logger.info(f"  Persisted {persisted_count} discovery-dropped items to state store")
         return filtered
 
     def _filter_fresh_candidates(self, candidates: list[ContentItem]) -> tuple[list[ContentItem], int, int]:
@@ -526,12 +852,14 @@ class Pipeline:
                 
                 # Drop undated items to honor strict freshness requirement
                 logger.debug(f"Dropping undated candidate: {item.source_key}")
+                self._pending_discovery_drops.append((item, "undated"))
                 undated_count += 1
                 continue
             if dt < cutoff:
                 logger.debug(
                     f"Dropping stale candidate: {item.source_key} (published {dt.isoformat()})"
                 )
+                self._pending_discovery_drops.append((item, "stale"))
                 stale_count += 1
                 continue
             fresh_items.append((dt, item))
@@ -699,11 +1027,15 @@ class Pipeline:
         # CRITICAL PATH: Write versioned results (synchronous)
         try:
             results_data = [item.to_dict() for item in items]
-            ResultsVersioning.write_results(results_data, execution_timestamp)
-            
+            ResultsVersioning.write_daily_results(
+                results_data,
+                execution_timestamp,
+                archive_dir=self.results_archive_dir,
+            )
+
             # Cleanup old results (30-day retention)
-            ResultsVersioning.cleanup_old_results()
-            
+            ResultsVersioning.cleanup_old_results(archive_dir=self.results_archive_dir)
+
             logger.info(f"  Output {len(items)} items")
         except Exception as e:
             logger.error(f"  Failed to write versioned results: {e}")
@@ -711,23 +1043,31 @@ class Pipeline:
         # BACKGROUND OPERATIONS: Async non-blocking
         # Import ThreadPoolExecutor for async operations
         from concurrent.futures import ThreadPoolExecutor
-        
-        executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pipeline-async")
-        
+
+        executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="pipeline-async")
+
         # Submit webhook sending as background task
-        if self.config.webhook_url and items:
+        if self.config.webhook_url and self.config.webhook_enabled and items:
             executor.submit(self._send_webhook_async, items)
             logger.debug("  Webhook sending started (async)")
-        
+        elif self.config.webhook_url and not self.config.webhook_enabled:
+            logger.debug("  Webhook disabled (WEBHOOK_ENABLED=false)")
+
+        if self.config.webhook_url_structured and self.config.webhook_structured_enabled and items:
+            executor.submit(self._send_structured_webhook_async, envelope, items)
+            logger.debug("  Structured webhook sending started (async)")
+        elif self.config.webhook_url_structured and not self.config.webhook_structured_enabled:
+            logger.debug("  Structured webhook disabled (WEBHOOK_STRUCTURED_ENABLED=false)")
+
         # Submit email archival as background task
         email_items = [item for item in items if item.source_type == "email" and item.email_archive_folder]
         if email_items:
             executor.submit(self._archive_emails_async, email_items)
             logger.debug(f"  Email archival started (async, {len(email_items)} items)")
-        
+
         # Don't wait for background tasks - pipeline continues immediately
         executor.shutdown(wait=False)
-        
+
         logger.info("  State persisted, results written (background tasks running)")
 
     def _send_webhook_async(self, items: list[ContentItem]) -> None:
@@ -762,6 +1102,37 @@ class Pipeline:
                 )
         except Exception as e:
             logger.error(f"  [ASYNC] [ERROR] Webhook error (non-fatal): {e}")
+
+    def _send_structured_webhook_async(self, envelope: Envelope, items: list[ContentItem]) -> None:
+        """Send structured webhook grouped by category and practice area."""
+        try:
+            payload = envelope.to_structured_webhook_dict(
+                practice_areas_order=self.config.practice_areas_order
+            )
+            total_articles = sum(
+                len(pa["articles"])
+                for cat in payload["categories"]
+                for pa in cat["practice_areas"]
+            )
+            logger.info(
+                f"  [ASYNC] Sending structured webhook ({total_articles} articles, "
+                f"{len(payload['categories'])} categories) to: "
+                f"{self.config.webhook_url_structured}"
+            )
+            response = requests.post(
+                self.config.webhook_url_structured,
+                json=payload,
+                timeout=30,
+            )
+            if 200 <= response.status_code < 300:
+                logger.info("  [ASYNC] [OK] Structured webhook sent successfully")
+            else:
+                logger.error(
+                    f"  [ASYNC] [FAILED] Structured webhook failed: {response.status_code} "
+                    f"{response.text}"
+                )
+        except Exception as e:
+            logger.error(f"  [ASYNC] [ERROR] Structured webhook error (non-fatal): {e}")
 
     def _archive_emails_async(self, email_items: list[ContentItem]) -> None:
         """Archive emails in background (non-blocking).
@@ -979,3 +1350,4 @@ class Pipeline:
         except Exception as e:
             logger.warning(f"  Auto-analysis failed: {e}")
             logger.info("  Continuing with current configuration")
+
