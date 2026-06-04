@@ -206,7 +206,6 @@ def structured_config():
     return Configuration(
         pipeline_version="2.0",
         web_sources=[WebSource(url="http://example.com", categories=["CCCI"])],
-        email_folders=[],
         categories=[Category("CCCI", ["test"])],
         webhook_url_structured="http://mock-structured-webhook.com",
         article_text_preparation=ArticlePreparationConfig(enabled=False),
@@ -309,7 +308,6 @@ class TestStructuredWebhookPipeline:
         config_no_structured = Configuration(
             pipeline_version="2.0",
             web_sources=[WebSource(url="http://example.com", categories=["CCCI"])],
-            email_folders=[],
             categories=[Category("CCCI", ["test"])],
             webhook_url_structured=None,
             article_text_preparation=ArticlePreparationConfig(enabled=False),

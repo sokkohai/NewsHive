@@ -21,7 +21,6 @@ def create_mock_config():
             categories=["Test"]
         )
     ]
-    config.email_folders = []
     config.categories = []  # Add categories for Discoverer init
     config.firecrawl_enabled = False
     config.jina_enabled = False

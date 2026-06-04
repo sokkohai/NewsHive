@@ -5,7 +5,7 @@ specs/core/CONFIGURATION.md.
 
 Supports both JSON (.json) and YAML (.yaml / .yml) configuration files.
 When a YAML file is loaded, an optional companion sources.yaml in the same
-directory is automatically merged in (provides web_sources / email_folders).
+directory is automatically merged in (provides web_sources).
 """
 
 import json
@@ -446,44 +446,6 @@ class WebSource:
 
 
 @dataclass
-class EmailFolder:
-    """Represents an email folder configuration with optional archive settings.
-
-    Per specs/core/EMAIL_ARCHIVAL.md, email folders can optionally specify
-    an archive folder for processed emails.
-    """
-
-    folder_path: str
-    archive_folder: str | None = None
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "EmailFolder":
-        """Create an EmailFolder from dictionary.
-
-        Args:
-            data: Dictionary with folder_path and optional archive_folder
-
-        Returns:
-            EmailFolder instance
-        """
-        if isinstance(data, str):
-             raise ConfigError(f"EmailFolder must be a dictionary, got string: {data}")
-
-        # New format: dict with folder_path and optional archive_folder
-        return cls(
-            folder_path=data.get("folder_path", ""),
-            archive_folder=data.get("archive_folder"),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert EmailFolder to dictionary."""
-        result: dict[str, Any] = {"folder_path": self.folder_path}
-        if self.archive_folder is not None:
-            result["archive_folder"] = self.archive_folder
-        return result
-
-
-@dataclass
 class QualityVerification:
     """Quality verification configuration.
     
@@ -595,13 +557,12 @@ class Configuration:
     """Configuration for the newshive pipeline.
 
     Implements the Configuration schema from specs/core/CONFIGURATION.md,
-    specs/core/EMAIL_ARCHIVAL.md, specs/core/SERVICE_TOGGLES.md,
-    specs/core/QUALITY_VERIFICATION.md, and Phase 3 Listings support.
+    specs/core/SERVICE_TOGGLES.md, specs/core/QUALITY_VERIFICATION.md,
+    and Phase 3 Listings support.
     """
 
     pipeline_version: str
     web_sources: list[WebSource]
-    email_folders: list[EmailFolder]
     categories: list[Category]
     webhook_url: str | None = None
     webhook_url_structured: str | None = None
@@ -722,12 +683,9 @@ class Configuration:
         ):
             errors.append("pipeline_version must be a non-empty string")
 
-        # Validate that at least one source is configured
-        if not self.web_sources and not self.email_folders:
-            errors.append(
-                "At least one of web_sources or email_folders must be "
-                "non-empty"
-            )
+        # Validate that at least one web source is configured
+        if not self.web_sources:
+            errors.append("web_sources must not be empty")
 
         # Validate categories
         if not isinstance(self.categories, list):
@@ -793,19 +751,6 @@ class Configuration:
                         f"'{source.fetch_method}', must be one of {sorted(WebSource.VALID_FETCH_METHODS)}"
                     )
 
-        # Validate email folders
-        if not isinstance(self.email_folders, list):
-            errors.append("email_folders must be a list")
-        else:
-            for i, folder in enumerate(self.email_folders):
-                if not isinstance(folder, EmailFolder):
-                    errors.append(
-                        f"email_folders[{i}] must be an EmailFolder object"
-                    )
-                    continue
-                if not folder.folder_path:
-                    errors.append(f"email_folders[{i}].folder_path must be non-empty")
-        
         # Phase 3: Validate listings configuration
         if not isinstance(self.listings_enabled, bool):
             errors.append(
@@ -864,12 +809,11 @@ class Configuration:
                 if not source.categories:
                     source.categories = default_categories.copy()
 
-        # Handle email_folders: support both old format (list of strings)
-        # and new format (list of dicts with folder_path and optional archive_folder)
-        email_folders_data = data.get("email_folders", [])
-        email_folders = [
-            EmailFolder.from_dict(ef) for ef in email_folders_data
-        ]
+        if "email_folders" in data:
+            raise ConfigError(
+                "email_folders is no longer supported. "
+                "NewsHive is web-only; configure sources under web_sources."
+            )
 
         quality_verification = QualityVerification.from_dict(
             data.get("quality_verification")
@@ -956,7 +900,6 @@ class Configuration:
         config = cls(
             pipeline_version=data.get("pipeline_version", ""),
             web_sources=web_sources,
-            email_folders=email_folders,
             categories=categories,
             webhook_url=os.getenv("WEBHOOK_URL") or data.get("webhook_url"),
             webhook_url_structured=os.getenv("WEBHOOK_URL_STRUCTURED") or data.get("webhook_url_structured"),
@@ -993,7 +936,6 @@ class Configuration:
         result: dict[str, Any] = {
             "pipeline_version": self.pipeline_version,
             "web_sources": [ws.to_dict() for ws in self.web_sources],
-            "email_folders": [ef.to_dict() for ef in self.email_folders],
             "categories": [c.to_dict() for c in self.categories],
         }
         if self.webhook_url:
@@ -1034,7 +976,7 @@ class ConfigLoader:
         Place user-facing settings in config.yaml and technical scraping
         settings in sources.yaml next to it.  ConfigLoader merges the two
         automatically when sources.yaml exists and config.yaml does not
-        already contain web_sources / email_folders.
+        already contain web_sources.
     """
 
     DEFAULT_CONFIG_PATH = Path("./config.yaml")
@@ -1065,9 +1007,8 @@ class ConfigLoader:
 
         Two-file merge:
             If the resolved config file is a YAML file and a sources.yaml
-            exists in the same directory, web_sources and email_folders are
-            loaded from sources.yaml (unless they are already present in the
-            main config file).
+            exists in the same directory, web_sources are loaded from
+            sources.yaml (unless already present in the main config file).
 
         Args:
             config_path: Explicit path to configuration file (.json or .yaml).
@@ -1112,8 +1053,6 @@ class ConfigLoader:
                 sources_data = ConfigLoader._load_file(sources_path)
                 if "web_sources" not in data and "web_sources" in sources_data:
                     data["web_sources"] = sources_data["web_sources"]
-                if "email_folders" not in data and "email_folders" in sources_data:
-                    data["email_folders"] = sources_data["email_folders"]
 
         return Configuration.from_dict(data)
 
@@ -1148,49 +1087,3 @@ class ConfigLoader:
 
         return cast(str, provider), cast(str, model), cast(str, api_key)
 
-    @staticmethod
-    def get_azure_config() -> tuple[str, str, str, str | None]:
-        """Get Azure credentials from environment variables.
-
-        Returns:
-            Tuple of (client_id, client_secret, tenant_id, refresh_token)
-
-        Raises:
-            ValueError: If any required Azure environment variable is missing
-        """
-        client_id = os.getenv("AZURE_CLIENT_ID") or os.getenv("OUTLOOK_CLIENT_ID")
-        client_secret = os.getenv("AZURE_CLIENT_SECRET") or os.getenv("OUTLOOK_CLIENT_SECRET")
-        tenant_id = os.getenv("AZURE_TENANT_ID") or os.getenv("OUTLOOK_TENANT_ID")
-        refresh_token = os.getenv("AZURE_REFRESH_TOKEN")
-
-        errors = []
-        if not client_id:
-            errors.append(
-                "AZURE_CLIENT_ID or OUTLOOK_CLIENT_ID "
-                "environment variable not set"
-            )
-        if not client_secret:
-            errors.append(
-                "AZURE_CLIENT_SECRET or OUTLOOK_CLIENT_SECRET "
-                "environment variable not set"
-            )
-        if not tenant_id:
-            errors.append(
-                "AZURE_TENANT_ID or OUTLOOK_TENANT_ID "
-                "environment variable not set"
-            )
-
-        if errors:
-            error_msg = (
-                "Azure/Outlook configuration incomplete "
-                "(required for email sources):\n"
-                + "\n".join(f"  - {e}" for e in errors)
-            )
-            raise ValueError(error_msg)
-
-        return (
-            cast(str, client_id),
-            cast(str, client_secret),
-            cast(str, tenant_id),
-            refresh_token,
-        )

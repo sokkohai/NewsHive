@@ -15,6 +15,10 @@ class BFHPatternExtractor(PatternExtractor):
 
     PATTERN = r"(Urteil|Beschluss)\s+vom\s+(\d{1,2}\.)\s+(\w+)\s+(\d{4}),\s+([A-Z]+\s+[RLC]+\s+\d+/\d{2})"
 
+    @classmethod
+    def matches_source(cls, source) -> bool:
+        return "bundesfinanzhof" in source.url.lower()
+
     def extract(self, html_content: str) -> str | None:
         if not html_content:
             return None

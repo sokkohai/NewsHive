@@ -29,7 +29,10 @@ from .models import ContentItem
 from .language_detection import detect_language
 from .listings_extractor import get_listings_extractor, ListingArticle
 from .config import Configuration
-from .pattern_extractors import get_extractor_for_source
+from .pattern_extractors import (
+    get_extractor_for_source,
+    get_listing_extractor_for_url,
+)
 
 # Try to import Playwright
 try:
@@ -440,6 +443,69 @@ class WebExtractor:
         self.browser_crawler = BrowserCrawler()
         self.listings_extractor = get_listings_extractor()  # Add listings extractor
 
+    def _serialize_listings_articles(
+        self,
+        source_url: str,
+        articles: list[dict[str, Any]],
+    ) -> str:
+        """Serialize specialized listing extractor output to canonical payload."""
+        listings_data = {
+            "type": "listings",
+            "source_url": source_url,
+            "count": len(articles),
+            "articles": [
+                {
+                    "title": article.get("title", ""),
+                    "date": article.get("date", "unknown"),
+                    "content": article.get("content", ""),
+                    "url": article.get("url", source_url),
+                    "category": article.get("category"),
+                    "confidence": article.get("confidence", 0.8),
+                    "extraction_method": article.get("extraction_method", "pattern_listing"),
+                }
+                for article in articles
+            ],
+        }
+        return json.dumps(listings_data, ensure_ascii=False)
+
+    def _extract_pattern_listing_page(self, url: str) -> tuple[str, str] | None:
+        """Expand specialized listing pages through pluggable pattern extractors."""
+        extractor = get_listing_extractor_for_url(url)
+        if extractor is None:
+            return None
+
+        try:
+            response = requests.get(
+                url,
+                headers=self.local_extractor._get_headers(),
+                timeout=15,
+            )
+            if response.status_code != 200:
+                logger.debug(
+                    f"Pattern listing fetch got HTTP {response.status_code} for {url}"
+                )
+                return None
+            html_content = response.text
+        except Exception as exc:
+            logger.debug(f"Pattern listing fetch failed for {url}: {exc}")
+            return None
+
+        try:
+            articles = extractor.extract_articles(html_content, url)
+        except Exception as exc:
+            logger.debug(
+                f"Pattern listing extractor {extractor.__class__.__name__} failed for {url}: {exc}"
+            )
+            return None
+
+        if not articles:
+            return None
+
+        logger.info(
+            f"Expanded listing page via {extractor.__class__.__name__}: {len(articles)} article(s)"
+        )
+        return self._serialize_listings_articles(url, articles), "listings"
+
     def _is_configured_listing_page(self, url: str) -> bool:
         """Check if URL is configured as an inline listing page in the config.
 
@@ -488,8 +554,13 @@ class WebExtractor:
             Tuple of (content, extraction_method) or None if all fail
         """
         method = fetch_method.lower()
+
+        # 0. Pattern-based listing extractors (site-specific expansion)
+        pattern_listing_result = self._extract_pattern_listing_page(url)
+        if pattern_listing_result:
+            return pattern_listing_result
         
-        # 0. Check if this URL is configured as a listing page
+        # 1. Check if this URL is configured as a listing page
         # Only attempt listings detection on URLs explicitly marked in config
         if self._is_configured_listing_page(url):
             headers = {
@@ -574,14 +645,14 @@ class WebExtractor:
             return None
         
         # --- Auto: full fallback chain (default) ---
-        # 1. Try primary method (Local - Tier 1: static + Tier 2: dynamic)
+        # 2. Try primary method (Local - Tier 1: static + Tier 2: dynamic)
         # _AuthRequiredError (401) propagates upward to skip all browser fallbacks.
         # 403 falls through to browser_crawl — Playwright may bypass bot-detection.
         content = self.local_extractor.extract(url)
         if content:
             return content, "local"
 
-        # 2. Try secondary fallback (Browser Crawling)
+        # 3. Try secondary fallback (Browser Crawling)
         content = self.browser_crawler.extract(url)
         if content:
             return content, "browser_crawl"
@@ -1133,18 +1204,6 @@ class Extractor:
             else:
                 # Extraction failed
                 return None, "Extraction failed: could not retrieve content"
-
-        elif item.source_type == "email":
-            # Note: Emails are treated as link containers during Discovery.
-            # The EmailDiscoverer extracts links from email bodies and creates
-            # ContentItems with source_type="web" for each link. Therefore,
-            # extraction should never receive items with source_type="email".
-            # If this occurs, it indicates a discovery/extraction pipeline error.
-            logger.warning(
-                f"Unexpected source_type='email' in extraction: {item.id}. "
-                "Emails should be converted to web items during discovery."
-            )
-            return None, "extraction_failed"
 
         return None, "extraction_failed"
 

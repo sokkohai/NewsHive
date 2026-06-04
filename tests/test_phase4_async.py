@@ -1,7 +1,7 @@
 """Tests for Phase 4: Async Output Operations.
 
-Verifies that webhook sending and email archival are performed asynchronously
-without blocking pipeline completion.
+Verifies that webhook sending is performed asynchronously without blocking
+pipeline completion.
 
 Specification: specs/core/IMPLEMENTATION_GUIDE.md Phase 4
 """
@@ -20,7 +20,6 @@ def mock_config():
     config = Mock()
     config.pipeline_version = "2.0"
     config.web_sources = []
-    config.email_sources = []
     config.categories = []  # Add categories for Discoverer init
     config.keywords = ["test"]
     config.firecrawl_enabled = False
@@ -47,25 +46,8 @@ def sample_items():
         discovered_at="2024-01-15T10:00:00Z",
         extracted_at="2024-01-15T10:05:00Z",
     )
-    
-    item2 = ContentItem(
-        id="test:2",
-        source_type="email",
-        source_key="email:msg-123",
-        title="Test Email",
-        content="Email content",
-        summary="Email summary",
-        categories=["TEST"],
-        language_detected="en",
-        published_at="2024-01-15T11:00:00Z",
-        discovered_at="2024-01-15T11:00:00Z",
-        extracted_at="2024-01-15T11:05:00Z",
-    )
-    # Set email-specific fields
-    item2.email_id = "msg-123"
-    item2.email_archive_folder = "Archive"
-    
-    return [item1, item2]
+
+    return [item1]
 
 
 def test_async_output_operations_dont_block(mock_config, sample_items):
@@ -89,20 +71,13 @@ def test_async_output_operations_dont_block(mock_config, sample_items):
                 
                 # Mock webhook and email operations to simulate delay
                 webhook_called = False
-                email_called = False
                 
                 def slow_webhook(items):
                     nonlocal webhook_called
                     time.sleep(0.1)  # Simulate network delay
                     webhook_called = True
-                
-                def slow_email(items):
-                    nonlocal email_called
-                    time.sleep(0.1)  # Simulate Outlook API delay
-                    email_called = True
-                
-                with patch.object(pipeline, '_send_webhook_async', side_effect=slow_webhook), \
-                     patch.object(pipeline, '_archive_emails_async', side_effect=slow_email):
+
+                with patch.object(pipeline, '_send_webhook_async', side_effect=slow_webhook):
                     
                     # Record start time
                     start_time = time.time()
@@ -122,8 +97,7 @@ def test_async_output_operations_dont_block(mock_config, sample_items):
                     
                     # Verify async operations were called
                     assert webhook_called, "Webhook should have been called"
-                    assert email_called, "Email archival should have been called"
-                    
+
                     print(f"\n✅ Phase 4: Output stage completed in {elapsed:.3f}s (async operations in background)")
 
 
@@ -143,25 +117,6 @@ def test_webhook_async_error_handling(mock_config, sample_items):
                 pytest.fail(f"Webhook error should be caught, got: {e}")
             
             print("\n✅ Webhook errors are handled gracefully")
-
-
-def test_email_archival_async_error_handling(mock_config, sample_items):
-    """Test that email archival errors don't crash the pipeline."""
-    with patch("src.pipeline.ConfigLoader.load", return_value=mock_config):
-        
-        pipeline = Pipeline(mock_config)
-        
-        # Mock email move to raise exception
-        with patch.object(pipeline, '_move_email_with_retry', side_effect=Exception("Outlook error")):
-            
-            # Should not crash
-            try:
-                email_items = [item for item in sample_items if item.source_type == "email"]
-                pipeline._archive_emails_async(email_items)
-            except Exception as e:
-                pytest.fail(f"Email error should be caught, got: {e}")
-            
-            print("\n✅ Email archival errors are handled gracefully")
 
 
 def test_state_updates_are_synchronous(mock_config, sample_items):
@@ -186,8 +141,7 @@ def test_state_updates_are_synchronous(mock_config, sample_items):
             
             with patch('src.pipeline.ResultsVersioning.write_results'), \
                  patch('src.pipeline.ResultsVersioning.cleanup_old_results'), \
-                 patch.object(pipeline, '_send_webhook_async'), \
-                 patch.object(pipeline, '_archive_emails_async'):
+                  patch.object(pipeline, '_send_webhook_async'):
                 
                 # Call output stage
                 pipeline._stage_output(sample_items, "2024-01-15T10:00:00Z", envelope)
@@ -206,16 +160,14 @@ def test_async_performance_improvement():
     state_update_time = 0.05  # 50ms
     results_write_time = 0.10  # 100ms
     webhook_time = 0.20  # 200ms
-    email_archival_time = 0.30  # 300ms
-    
-    before_time = state_update_time + results_write_time + webhook_time + email_archival_time
+    before_time = state_update_time + results_write_time + webhook_time
     
     # After Phase 4: Webhook and email async
     after_time = state_update_time + results_write_time  # Only critical path
     
     speedup = before_time / after_time
     
-    assert speedup >= 3.0, f"Expected 3x+ speedup, got {speedup}x"
+    assert speedup >= 2.0, f"Expected 2x+ speedup, got {speedup}x"
     
     print(f"\n✅ Phase 4 performance improvement:")
     print(f"   Before: {before_time * 1000:.0f}ms (all sequential)")
@@ -231,10 +183,7 @@ def test_critical_path_operations():
         "State persistence",
     ]
     
-    non_critical_operations = [
-        "Webhook sending",
-        "Email archival",
-    ]
+    non_critical_operations = ["Webhook sending"]
     
     print("\n✅ Phase 4 operation classification:")
     print("   CRITICAL (synchronous):")

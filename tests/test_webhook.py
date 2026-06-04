@@ -18,7 +18,6 @@ def mock_config(real_webhook_url):
     return Configuration(
         pipeline_version="1.0",
         web_sources=[WebSource(url="http://example.com", categories=["test_topic"])],
-        email_folders=[],
         categories=[Category("test_topic", ["test"])],
         webhook_url=real_webhook_url,
         article_text_preparation=ArticlePreparationConfig(enabled=False),

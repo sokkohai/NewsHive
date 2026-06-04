@@ -10,12 +10,15 @@ import os
 import re
 from datetime import datetime, timezone, timedelta
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
+import requests
 from bs4 import BeautifulSoup
 
-from .config import Configuration, ConfigLoader
+from .config import Configuration
+from .date_utils import parse_date_to_utc
 from .models import ContentItem
+from .pattern_extractors import get_inline_listing_extractor_for_url
 
 logger = logging.getLogger(__name__)
 
@@ -517,110 +520,11 @@ def _normalize_discovered_date(date_str: str, date_format: str | None = None) ->
     Returns:
         ISO 8601 timestamp or "unknown"
     """
-    try:
-        from dateutil import parser as dateutil_parser
-        
-        # Clean up the string
-        date_str = date_str.strip()
-        
-        if not date_str:
-            return "unknown"
-        
-        # Replace German month names with English
-        # Only replace if the German month is a standalone word (not substring)
-        german_months = {
-            'januar': 'january', 'februar': 'february', 'märz': 'march',
-            'april': 'april', 'mai': 'may', 'juni': 'june',
-            'juli': 'july', 'august': 'august', 'september': 'september',
-            'oktober': 'october', 'november': 'november', 'dezember': 'december',
-            'mär': 'march', 'dez': 'december', 'okt': 'october',
-            'jan': 'january', 'feb': 'february', 'apr': 'april', 'jun': 'june',
-            'jul': 'july', 'aug': 'august', 'sep': 'september', 'nov': 'november'
-        }
-        date_str_lower = date_str.lower()
-        # Use word boundaries to avoid replacing substrings
-        for de, en in german_months.items():
-            date_str_lower = re.sub(r'\b' + de + r'\b', en, date_str_lower)
-
-        
-        # Month name mappings for manual parsing
-        month_names = {
-            'january': 1, 'february': 2, 'march': 3, 'april': 4,
-            'may': 5, 'june': 6, 'july': 7, 'august': 8,
-            'september': 9, 'october': 10, 'november': 11, 'december': 12,
-            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6,
-            'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
-        }
-        
-        # Try manual parsing for common patterns first (more reliable than dateutil for these)
-        # Pattern 1: DD Month YYYY or D Month YYYY (e.g., "22 January 2026", "7 January 2026")
-        # Also handles: "22 January 2026: Test Article" with optional trailing content
-        day_month_year = re.search(r'(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{4})', date_str_lower, re.IGNORECASE)
-        if day_month_year:
-            day = int(day_month_year.group(1))
-            month_str = day_month_year.group(2).lower()
-            year = int(day_month_year.group(3))
-            month = month_names.get(month_str, 0)
-            if 1 <= month <= 12 and 1 <= day <= 31:
-                try:
-                    dt = datetime(year, month, day, tzinfo=timezone.utc)
-                    return dt.isoformat().replace("+00:00", "Z")
-                except ValueError:
-                    pass
-        
-        # Pattern 2: Month DD, YYYY or Month D, YYYY (e.g., "January 8, 2026")
-        month_day_year = re.search(r'(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})', date_str_lower, re.IGNORECASE)
-        if month_day_year:
-            month_str = month_day_year.group(1).lower()
-            day = int(month_day_year.group(2))
-            year = int(month_day_year.group(3))
-            month = month_names.get(month_str, 0)
-            if 1 <= month <= 12 and 1 <= day <= 31:
-                try:
-                    dt = datetime(year, month, day, tzinfo=timezone.utc)
-                    return dt.isoformat().replace("+00:00", "Z")
-                except ValueError:
-                    pass
-        
-        # Pattern 3: DD.MM.YYYY (e.g., "22.01.2026")
-        ddmmyyyy = re.search(r'(\d{1,2})\.(\d{1,2})\.(\d{4})', date_str)
-        if ddmmyyyy:
-            day = int(ddmmyyyy.group(1))
-            month = int(ddmmyyyy.group(2))
-            year = int(ddmmyyyy.group(3))
-            if 1 <= month <= 12 and 1 <= day <= 31:
-                try:
-                    dt = datetime(year, month, day, tzinfo=timezone.utc)
-                    return dt.isoformat().replace("+00:00", "Z")
-                except ValueError:
-                    pass
-        
-        # Pattern 4: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ (ISO format) or in URLs /YYYY/MM/DD
-        iso_date = re.search(r'(\d{4})[-/](\d{2})[-/](\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2})(.*))?', date_str)
-        if iso_date:
-            year = int(iso_date.group(1))
-            month = int(iso_date.group(2))
-            day = int(iso_date.group(3))
-            hour = int(iso_date.group(4)) if iso_date.group(4) else 0
-            minute = int(iso_date.group(5)) if iso_date.group(5) else 0
-            second = int(iso_date.group(6)) if iso_date.group(6) else 0
-            try:
-                dt = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
-                return dt.isoformat().replace("+00:00", "Z")
-            except ValueError:
-                pass
-        
-        # Fallback: use dateutil parser with dayfirst for remaining cases
-        dt = dateutil_parser.parse(date_str_lower, dayfirst=True, fuzzy=True)
-        
-        # Convert to UTC if no timezone
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        
-        # Return ISO 8601 format
-        return dt.isoformat().replace("+00:00", "Z")
-    except Exception:
+    del date_format  # kept for compatibility with configured date extraction hints
+    dt = parse_date_to_utc(date_str)
+    if dt is None:
         return "unknown"
+    return dt.isoformat().replace("+00:00", "Z")
 
 
 class WebDiscoverer:
@@ -1866,187 +1770,6 @@ class WebDiscoverer:
             return None
 
 
-class EmailDiscoverer:
-    """Discovers content from configured Outlook folders.
-
-    Treats emails as "newsletters" or listing pages: parses the email body
-    to find links to articles, extracting each link as a separate 'web'
-    candidate item. This enables proper deduplication against web sources.
-
-    Implements email discovery as specified in specs/core/DISCOVERY.md.
-    """
-
-    def extract_links(
-        self, html_content: str, base_url: str = ""
-    ) -> list[tuple[str, str]]:
-        """Extract links and their text from HTML content.
-
-        Args:
-            html_content: The HTML body of the email.
-            base_url: Base URL for resolving relative links (optional).
-
-        Returns:
-            List of (url, text) tuples.
-        """
-        try:
-            from bs4 import BeautifulSoup
-
-            soup = BeautifulSoup(html_content, "html.parser")
-            links: list[tuple[str, str]] = []
-
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                text = a.get_text(strip=True)
-
-                # Ensure href is a string
-                url_str = str(href) if href else ""
-
-                # Skip pagination links (page 2+, offsets)
-                if _is_pagination_url(url_str):
-                    continue
-
-                # Filter criteria for real articles in emails:
-                # 1. Minimum text length
-                if len(text) <= 5:
-                    continue
-
-                # 2. Skip protocol-only links
-                if url_str.startswith("mailto:") or url_str.startswith("javascript:"):
-                    continue
-
-                # 3. Skip image files, media, and non-content URLs
-                media_extensions = [".jpg", ".jpeg", ".png",
-                                    ".gif", ".pdf", ".mp3", ".mp4", ".webp"]
-                if any(url_str.lower().endswith(ext) for ext in media_extensions):
-                    continue
-
-                # 4. Skip obvious category/tag/archive pages
-                skip_patterns = ["/category/", "/tag/", "/tags/", "/archive/", "/archiv/",
-                                 "/themen/", "/kategorien/", "/kompetenzen/", "/topics/",
-                                 "/taxonomy/", "/search/", "/results/", "?page=", "?offset="]
-                if any(pattern in url_str.lower() for pattern in skip_patterns):
-                    continue
-
-                # 5. Skip URLs that end with just / (navigation)
-                if url_str.rstrip().endswith("/") and url_str.count("/") <= 3:
-                    continue
-
-                # 6. Skip image parameter URLs
-                if "?t=a-s" in url_str or (url_str.count("?") > 2):
-                    continue
-
-                # 7. Skip very short URLs (usually navigation)
-                if len(url_str) < 15:
-                    continue
-
-                links.append((url_str, text))
-
-            return links
-        except ImportError:
-            # Fallback if bs4 not available (though it should be)
-            import re
-
-            fallback_links: list[tuple[str, str]] = []
-            # Simple regex for href handling (very basic)
-            pattern = re.compile(
-                r'<a\s+(?:[^>]*?\s+)?href="([^"]*)"[^>]*>(.*?)</a>',
-                re.IGNORECASE | re.DOTALL,
-            )
-            for match in pattern.finditer(html_content):
-                url, text = match.groups()
-                # Remove inner tags
-                clean_text = re.sub(r"<[^>]+>", "", text).strip()
-
-                # Apply same filters as BeautifulSoup path
-                if len(clean_text) <= 5:
-                    continue
-                if url.startswith("mailto:") or url.startswith("javascript:"):
-                    continue
-
-                media_extensions = [".jpg", ".jpeg", ".png",
-                                    ".gif", ".pdf", ".mp3", ".mp4", ".webp"]
-                if any(url.lower().endswith(ext) for ext in media_extensions):
-                    continue
-
-                skip_patterns = ["/category/", "/tag/", "/tags/", "/archive/", "/archiv/",
-                                 "/themen/", "/kategorien/", "/kompetenzen/", "/topics/",
-                                 "/taxonomy/", "/search/", "/results/", "?page=", "?offset="]
-                if any(p in url.lower() for p in skip_patterns):
-                    continue
-
-                if url.rstrip().endswith("/") and url.count("/") <= 3:
-                    continue
-
-                if "?t=a-s" in url or url.count("?") > 2:
-                    continue
-
-                if len(url) < 15:
-                    continue
-
-                fallback_links.append((url, clean_text))
-            return fallback_links
-        except Exception:
-            return []
-
-    def discover(
-        self, email_body: str, email_subject: str, email_id: str, sender: str,
-        email_folder_source: str = "", email_archive_folder: str | None = None,
-        email_sent_date: str | None = None
-    ) -> list[ContentItem]:
-        """Discover articles from a single email by parsing its links.
-
-        Per specs/core/EMAIL_ARCHIVAL.md, stores email archival metadata
-        (email_id, folder_source, archive_folder) for later processing.
-
-        Per specs/core/DISCOVERY.md, extracts publication date from email sent date.
-
-        Args:
-            email_body: HTML content of the email
-            email_subject: Subject line of the email
-            email_id: Unique ID of the email (O365 message object_id)
-            sender: Sender address
-            email_folder_source: Source folder path (e.g., "Inbox/Newsletters")
-            email_archive_folder: Archive folder path if configured
-            email_sent_date: ISO 8601 timestamp of when the email was sent
-
-        Returns:
-            List of candidate ContentItems (of type="web") found in the email
-        """
-        candidates: list[ContentItem] = []
-        links = self.extract_links(email_body)
-
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-        for url, text in links:
-            # Create a 'web' candidate item for each link
-            # This allows it to be deduplicated against web sources
-            source_key = url
-
-            item = ContentItem(
-                id=source_key,
-                source_type="web",  # Treat as web content
-                source_key=source_key,
-                title=text,  # Use anchor text as title (cleaned at output time)
-                summary="",
-                content="",
-                categories=[],  # Will be assigned during categorization
-                published_at=email_sent_date or "unknown",  # Use email sent date, fallback to unknown
-                discovered_at=now,
-                extracted_at="",
-                source_url=url,
-                # Metadata to trace back to email
-                email_subject=email_subject,
-                email_sender=sender,
-                # Email archival metadata (per specs/core/EMAIL_ARCHIVAL.md)
-                email_id=email_id,
-                email_folder_source=email_folder_source,
-                email_archive_folder=email_archive_folder,
-            )
-            candidates.append(item)
-
-        return candidates
-
-
 class Discoverer:
     """Orchestrates content discovery from all configured sources.
 
@@ -2072,7 +1795,6 @@ class Discoverer:
         
         self.state_store_manager = state_store_manager
         self.web_discoverer = WebDiscoverer()
-        self.email_discoverer = EmailDiscoverer()
 
     def _should_skip_by_state_store(self, source_key: str) -> bool:
         """Check if item should be skipped based on State Store status.
@@ -2161,6 +1883,50 @@ class Discoverer:
                 return True
         return False
 
+    def _discover_inline_candidates(self, source_url: str) -> list[tuple[str, str, str]]:
+        """Discover synthetic inline article candidates via pluggable extractor."""
+        extractor = get_inline_listing_extractor_for_url(source_url)
+        if extractor is None:
+            return []
+
+        try:
+            response = requests.get(source_url, timeout=15)
+            if response.status_code != 200:
+                logger.debug(
+                    f"Inline listing fetch got HTTP {response.status_code} for {source_url}"
+                )
+                return []
+            html_content = response.text
+        except Exception as exc:
+            logger.debug(f"Inline listing fetch failed for {source_url}: {exc}")
+            return []
+
+        try:
+            raw_candidates = extractor.extract_inline_candidates(html_content, source_url)
+        except Exception as exc:
+            logger.debug(
+                f"Inline listing extractor {extractor.__class__.__name__} failed for {source_url}: {exc}"
+            )
+            return []
+
+        candidates: list[tuple[str, str, str]] = []
+        for entry in raw_candidates:
+            url_value = str(entry.get("url", "")).strip()
+            title_value = str(entry.get("title", "")).strip()
+            date_value = str(entry.get("date", "unknown")).strip() or "unknown"
+            if not url_value:
+                continue
+
+            resolved_url = urljoin(source_url, url_value)
+            candidates.append((resolved_url, title_value, date_value))
+
+        if candidates:
+            logger.info(
+                f"Discovered {len(candidates)} inline candidates via {extractor.__class__.__name__}"
+            )
+
+        return candidates
+
     def discover(self, last_run_timestamp: str | None = None) -> list[ContentItem]:
         """Discover candidate items from all configured sources.
 
@@ -2174,7 +1940,7 @@ class Discoverer:
                                 Used for incremental email discovery.
 
         Returns:
-            List of candidate ContentItems from web and email sources
+            List of candidate ContentItems from configured web sources
         """
         candidates: list[ContentItem] = []
 
@@ -2231,6 +1997,16 @@ class Discoverer:
                     browser_actions=web_source.browser_actions,
                     item_selector=web_source.item_selector,
                 )
+                if web_source.listings_type == "inline":
+                    inline_articles = self._discover_inline_candidates(web_source.url)
+                    if inline_articles:
+                        seen_urls = {article_url for article_url, _, _ in articles}
+                        for inline_url, inline_title, inline_date in inline_articles:
+                            if inline_url in seen_urls:
+                                continue
+                            articles.append((inline_url, inline_title, inline_date))
+                            seen_urls.add(inline_url)
+
                 for article_url, article_title, published_date in articles:
                     # Filter out the source URL itself — it's a hub/listing page, not an article
                     if (
@@ -2364,152 +2140,4 @@ class Discoverer:
             except Exception as e:
                 logger.error(f"  Web discovery failed for {web_source.url}: {e}")
 
-        # Discover from email sources (optional - only if configured)
-        if self.config.email_folders:
-            try:
-                candidates.extend(self._discover_emails(last_run_timestamp))
-            except ValueError as e:
-                logger.warning(f"  Email discovery skipped: {e}")
-            except Exception as e:
-                logger.warning(f"  Email discovery failed: {e}")
-
         return candidates
-
-    def _discover_emails(self, last_run_timestamp: str | None) -> list[ContentItem]:
-        """Discover articles from configured Outlook folders.
-
-        Args:
-            last_run_timestamp: ISO 8601 timestamp for filtering new emails.
-
-        Returns:
-            List of candidate items found in emails.
-
-        Raises:
-            ValueError: If Azure/Outlook configuration is incomplete
-        """
-        email_candidates: list[ContentItem] = []
-
-        try:
-            from O365 import Account
-
-            # Get Azure configuration
-            try:
-                client_id, client_secret, tenant_id, refresh_token = (
-                    ConfigLoader.get_azure_config()
-                )
-            except ValueError as e:
-                # Re-raise to be caught by outer try-except in discover()
-                error_msg = (
-                    "Azure/Outlook configuration incomplete "
-                    "(required for email sources): "
-                    f"{str(e)}"
-                )
-                raise ValueError(error_msg) from e
-
-            # Initialize account
-            # We use a custom token backend if refresh_token is provided via env
-            credentials = (client_id, client_secret)
-            account = Account(credentials, tenant_id=tenant_id)
-
-            if refresh_token:
-                # If refresh token is in env, manually inject it into the token backend
-                # This avoids requiring the o365_token.txt file
-                token = {
-                    'refresh_token': refresh_token,
-                    'access_token': None,  # Will be refreshed
-                    'expires_at': 0  # Expired
-                }
-                account.connection.token_backend.save_token(token)
-
-            if not account.is_authenticated:
-                logger.error("  Outlook authentication failed. Skipping email discovery.")
-                return []
-
-            mailbox = account.mailbox()
-
-            for email_folder_config in self.config.email_folders:
-                folder_path = email_folder_config.folder_path
-                archive_folder = email_folder_config.archive_folder
-
-                try:
-                    logger.info(f"  Scanning email folder: {folder_path}")
-                    folder = self._resolve_folder(mailbox, folder_path)
-                    if not folder:
-                        logger.warning(f"  Could not find folder: {folder_path}")
-                        continue
-
-                    # Build query for date filtering
-                    query = None
-                    if last_run_timestamp:
-                        # O365 library uses receivedDateTime for filtering
-                        # Format: receivedDateTime ge 2023-01-01T00:00:00Z
-                        query = folder.q().greater_equal('receivedDateTime', last_run_timestamp)
-
-                    # Fetch emails
-                    messages = folder.get_messages(
-                        limit=100, query=query, download_attachments=False)
-
-                    for message in messages:
-                        # Extract email sent date
-                        email_sent_date = "unknown"
-                        if hasattr(message, 'sent') and message.sent:
-                            try:
-                                # O365 message.sent is a datetime object
-                                email_sent_date = message.sent.isoformat().replace("+00:00", "Z")
-                            except Exception:
-                                email_sent_date = "unknown"
-                        
-                        # Discover links from email
-                        items = self.email_discoverer.discover(
-                            email_body=message.body,
-                            email_subject=message.subject,
-                            email_id=message.object_id,
-                            sender=message.sender.address,
-                            email_folder_source=folder_path,
-                            email_archive_folder=archive_folder,
-                            email_sent_date=email_sent_date,
-                        )
-
-                        # Add all discovered items to candidates (no keyword filtering in discovery)
-                        # Per SPEC_CHANGES.md, keyword filtering happens in extraction stage
-                        for item in items:
-                            # Check State Store first
-                            if self._should_skip_by_state_store(item.source_key):
-                                logger.debug(f"  Skipping {item.source_key} (already processed)")
-                                continue
-                            email_candidates.append(item)
-
-                except Exception as e:
-                    logger.error(f"  Error processing folder {folder_path}: {e}")
-
-        except ImportError:
-            logger.error("  O365 library not installed. Skipping email discovery.")
-        except Exception as e:
-            logger.error(f"  Email discovery failed: {e}")
-
-        return email_candidates
-
-    def _resolve_folder(self, mailbox: Any, folder_path: str) -> Any:
-        """Resolve a folder path (e.g., 'Inbox/Subfolder') to an O365 folder object.
-
-        Args:
-            mailbox: O365 mailbox object.
-            folder_path: Path to the folder.
-
-        Returns:
-            O365 folder object or None.
-        """
-        parts = folder_path.strip('/').split('/')
-        current_folder = None
-
-        # Start with root folders
-        for part in parts:
-            if current_folder is None:
-                current_folder = mailbox.get_folder(folder_name=part)
-            else:
-                current_folder = current_folder.get_folder(folder_name=part)
-
-            if not current_folder:
-                return None
-
-        return current_folder

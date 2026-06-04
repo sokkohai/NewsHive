@@ -815,6 +815,9 @@ class Pipeline:
         Returns:
             Tuple of (filtered_items, stale_count, undated_count)
         """
+        if not hasattr(self, "_pending_discovery_drops"):
+            self._pending_discovery_drops = []
+
         max_age_days = getattr(self.config, "article_max_age_days", 3)
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
 
@@ -1003,7 +1006,7 @@ class Pipeline:
 
         Per Phase 4 (Async Output Operations):
         - CRITICAL PATH (synchronous blocking): State updates, results writing
-        - BACKGROUND (async non-blocking): Webhook sending, email archival
+        - BACKGROUND (async non-blocking): Webhook sending
 
         Args:
             items: Successfully processed items
@@ -1058,12 +1061,6 @@ class Pipeline:
             logger.debug("  Structured webhook sending started (async)")
         elif self.config.webhook_url_structured and not self.config.webhook_structured_enabled:
             logger.debug("  Structured webhook disabled (WEBHOOK_STRUCTURED_ENABLED=false)")
-
-        # Submit email archival as background task
-        email_items = [item for item in items if item.source_type == "email" and item.email_archive_folder]
-        if email_items:
-            executor.submit(self._archive_emails_async, email_items)
-            logger.debug(f"  Email archival started (async, {len(email_items)} items)")
 
         # Don't wait for background tasks - pipeline continues immediately
         executor.shutdown(wait=False)
@@ -1133,174 +1130,6 @@ class Pipeline:
                 )
         except Exception as e:
             logger.error(f"  [ASYNC] [ERROR] Structured webhook error (non-fatal): {e}")
-
-    def _archive_emails_async(self, email_items: list[ContentItem]) -> None:
-        """Archive emails in background (non-blocking).
-
-        Called asynchronously by ThreadPoolExecutor. Errors are logged but
-        do not block pipeline completion.
-
-        Args:
-            email_items: Email items to archive
-        """
-        try:
-            logger.info(f"  [ASYNC] Archiving {len(email_items)} emails...")
-            for item in email_items:
-                try:
-                    self._move_email_with_retry(item)
-                except Exception as e:
-                    logger.warning(
-                        f"  [ASYNC] Email archival failed for {item.email_id}: {e}"
-                    )
-            logger.info(f"  [ASYNC] [OK] Email archival complete")
-        except Exception as e:
-            logger.error(f"  [ASYNC] [ERROR] Email archival error (non-fatal): {e}")
-
-    def _move_email_with_retry(self, item: ContentItem) -> None:
-        """Move email to archive folder with retry logic.
-
-        Per specs/core/EMAIL_ARCHIVAL.md:
-        - Attempts move 3 times with exponential backoff (0s, 1s, 2s)
-        - Logs failure but does not raise (non-fatal)
-        - Only called for items with source_type="email" and archive_folder set
-
-        Args:
-            item: ContentItem with email_id and email_archive_folder set
-        """
-        # Pre-move validation
-        if not item.email_id:
-            logger.warning(
-                f"  Email archival: email_id missing for item {item.source_key}, "
-                "cannot archive"
-            )
-            return
-
-        if not item.email_archive_folder:
-            logger.debug(
-                f"  Email archival: No archive folder configured, skipping move "
-                "for {item.source_key}"
-            )
-            return
-
-        try:
-            from O365 import Account
-            from .config import ConfigLoader
-
-            # Get Azure configuration
-            try:
-                client_id, client_secret, tenant_id, refresh_token = (
-                    ConfigLoader.get_azure_config()
-                )
-            except ValueError as e:
-                logger.warning(
-                    f"  Email archival: Azure configuration incomplete, "
-                    f"skipping move: {e}"
-                )
-                return
-
-            # Initialize account
-            credentials = (client_id, client_secret)
-            account = Account(credentials, tenant_id=tenant_id)
-
-            if refresh_token:
-                token = {
-                    'refresh_token': refresh_token,
-                    'access_token': None,
-                    'expires_at': 0
-                }
-                account.connection.token_backend.save_token(token)
-
-            if not account.is_authenticated:
-                logger.warning("  Email archival: Outlook authentication failed, skipping move")
-                return
-
-            mailbox = account.mailbox()
-
-            # Retry logic: 3 attempts with backoff (0s, 1s, 2s)
-            max_retries = 3
-            backoff_delays = [0, 1, 2]
-
-            for attempt in range(max_retries):
-                try:
-                    if attempt > 0:
-                        time.sleep(backoff_delays[attempt])
-
-                    # Get the message object
-                    message = mailbox.get_message(item.email_id)
-                    if not message:
-                        logger.warning(
-                            f"  Email archival: Message {item.email_id} not found, "
-                            f"skipping move"
-                        )
-                        return
-
-                    # Get the archive folder
-                    archive_folder = self._resolve_folder(
-                        mailbox, item.email_archive_folder
-                    )
-                    if not archive_folder:
-                        logger.error(
-                            f"  Email archival: Archive folder "
-                            f"{item.email_archive_folder} not found, skipping move"
-                        )
-                        return
-
-                    # Move the message
-                    message.move(archive_folder.folder_id)
-
-                    logger.info(
-                        f"  Email archival: Moved email {item.email_id} "
-                        f"to {item.email_archive_folder}"
-                    )
-                    return
-
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        logger.debug(
-                            f"  Email archival: Attempt {attempt + 1} failed "
-                            f"for {item.email_id}: {e}. Retrying..."
-                        )
-                    else:
-                        logger.warning(
-                            f"  Email archival: Failed to move email "
-                            f"{item.email_id} to {item.email_archive_folder} "
-                            f"after 3 retries: {e}"
-                        )
-                        return
-
-        except ImportError:
-            logger.warning(
-                "  Email archival: O365 library not installed, skipping move"
-            )
-        except Exception as e:
-            logger.error(f"  Email archival: Unexpected error: {e}")
-
-    def _resolve_folder(self, mailbox: Any, folder_path: str) -> Any:
-        """Resolve a folder path to an O365 folder object.
-
-        Args:
-            mailbox: O365 mailbox object
-            folder_path: Path to folder (e.g., "Inbox/Archive")
-
-        Returns:
-            O365 folder object or None
-        """
-        try:
-            parts = folder_path.strip('/').split('/')
-            current_folder = None
-
-            for part in parts:
-                if current_folder is None:
-                    current_folder = mailbox.get_folder(folder_name=part)
-                else:
-                    current_folder = current_folder.get_folder(folder_name=part)
-
-                if not current_folder:
-                    return None
-
-            return current_folder
-        except Exception:
-            return None
 
     def _auto_analyze_sources(self) -> None:
         """Auto-analyze sources and apply extraction rules (Pre-stage).

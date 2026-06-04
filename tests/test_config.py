@@ -137,30 +137,29 @@ class TestConfiguration:
         config = Configuration(
             pipeline_version="1.0",
             web_sources=[WebSource(url="https://example.com", categories=["compliance"])],
-            email_folders=[],
             categories=[Category(name="compliance", keywords=["GDPR"])],
         )
 
         assert config.pipeline_version == "1.0"
         assert len(config.web_sources) == 1
 
-    def test_configuration_with_email_sources(self):
-        """Test Configuration with email sources."""
-        config = Configuration(
-            pipeline_version="1.0",
-            web_sources=[],
-            email_folders=["Inbox", "Inbox/Compliance"],
-            categories=[Category(name="compliance", keywords=["GDPR"])],
-        )
+    def test_configuration_rejects_email_folders(self):
+        """Test Configuration.from_dict rejects deprecated email_folders."""
+        data = {
+            "pipeline_version": "1.0",
+            "web_sources": [{"url": "https://example.com", "categories": ["compliance"]}],
+            "email_folders": [],
+            "categories": [{"name": "compliance", "keywords": ["GDPR"]}],
+        }
 
-        assert len(config.email_folders) == 2
+        with pytest.raises(ValueError):
+            Configuration.from_dict(data)
 
     def test_configuration_validation_success(self):
         """Test that valid configuration passes validation."""
         config = Configuration(
             pipeline_version="1.0",
             web_sources=[WebSource(url="https://example.com", categories=["compliance"])],
-            email_folders=[],
             categories=[Category(name="compliance", keywords=["GDPR"])],
         )
 
@@ -172,7 +171,6 @@ class TestConfiguration:
         config = Configuration(
             pipeline_version="",
             web_sources=[WebSource(url="https://example.com", categories=["test"])],
-            email_folders=[],
             categories=[Category(name="test", keywords=["keyword"])],
         )
 
@@ -184,7 +182,6 @@ class TestConfiguration:
         config = Configuration(
             pipeline_version="1.0",
             web_sources=[],
-            email_folders=[],
             categories=[Category(name="test", keywords=["keyword"])],
         )
 
@@ -196,7 +193,6 @@ class TestConfiguration:
         config = Configuration(
             pipeline_version="1.0",
             web_sources=[WebSource(url="https://example.com", categories=["test"])],
-            email_folders=[],
             categories=[Category(name="test", keywords=[])],
         )
 
@@ -208,7 +204,6 @@ class TestConfiguration:
         data = {
             "pipeline_version": "1.0",
             "web_sources": [{"url": "https://example.com", "categories": ["compliance"]}],
-            "email_folders": [],
             "categories": [{"name": "compliance", "keywords": ["GDPR"]}],
         }
 
@@ -221,7 +216,6 @@ class TestConfiguration:
         config = Configuration(
             pipeline_version="1.0",
             web_sources=[WebSource(url="https://example.com", categories=["compliance"])],
-            email_folders=[],
             categories=[Category(name="compliance", keywords=["GDPR"])],
         )
 
@@ -236,7 +230,6 @@ class TestConfiguration:
         data = {
             "pipeline_version": "1.0",
             "web_sources": [{"url": "https://example.com", "categories": ["CCCI"]}],
-            "email_folders": [],
             "categories": [
                 {
                     "name": "CCCI",
@@ -270,7 +263,6 @@ class TestConfiguration:
         data = {
             "pipeline_version": "1.0",
             "web_sources": [{"url": "https://example.com", "categories": ["CCCI", "ESG"]}],
-            "email_folders": [],
             "categories": [
                 {
                     "name": "CCCI",
@@ -297,7 +289,6 @@ class TestConfigLoader:
         config_data = {
             "pipeline_version": "1.0",
             "web_sources": [{"url": "https://example.com", "categories": ["compliance"]}],
-            "email_folders": [],
             "categories": [{"name": "compliance", "keywords": ["GDPR"]}],
         }
 
@@ -329,7 +320,6 @@ class TestConfigLoader:
         config_data = {
             "pipeline_version": "",  # Invalid: empty
             "web_sources": [{"url": "https://example.com", "categories": ["test"]}],
-            "email_folders": [],
             "categories": [{"name": "test", "keywords": ["test"]}],
         }
 
@@ -346,7 +336,6 @@ class TestConfigLoader:
         config_data = {
             "pipeline_version": "2.0",
             "web_sources": [{"url": "https://example.com", "categories": ["compliance"]}],
-            "email_folders": [],
             "categories": [{"name": "compliance", "keywords": ["GDPR"]}],
         }
 
@@ -368,7 +357,6 @@ class TestConfigLoader:
         }
         sources_data = {
             "web_sources": [{"url": "https://example.com", "categories": ["compliance"]}],
-            "email_folders": [],
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -392,7 +380,6 @@ class TestConfigLoader:
         }
         sources_data = {
             "web_sources": [{"url": "https://should-not-appear.example.com", "categories": ["compliance"]}],
-            "email_folders": [],
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:

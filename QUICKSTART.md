@@ -45,11 +45,6 @@ LLM_MODEL=your-model-name
 LLM_API_KEY=your-bearer-token
 LLM_API_URL=https://your-endpoint/v1/responses
 
-# Email integration (optional)
-OUTLOOK_CLIENT_ID=...
-OUTLOOK_CLIENT_SECRET=...
-OUTLOOK_TENANT_ID=...
-
 # Webhook delivery (optional)
 WEBHOOK_URL=https://...
 ```
@@ -63,7 +58,7 @@ cp sources.yaml.example sources.yaml
 cp config.yaml.example config.yaml
 ```
 
-Edit `sources.yaml` to add your web sources and email folders.  
+Edit `sources.yaml` to add your web sources.  
 Edit `config.yaml` to configure categories, keywords, and relevance scoring.
 
 ## Running the Pipeline

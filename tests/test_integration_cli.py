@@ -62,7 +62,6 @@ class TestCLIPipeline(unittest.TestCase):
                     "listings_type": "linked"
                 }
             ],
-            "email_folders": [],
             "keywords": ["test"],
             "categories": [{"name": "test", "keywords": ["test"]}],
         }
@@ -101,7 +100,6 @@ class TestCLIExitCodes(unittest.TestCase):
                         "listings_type": "linked"
                     }
                 ],
-                "email_folders": [],
                 "keywords": ["test"],
                 "categories": [{"name": "test", "keywords": ["test"]}],
             }

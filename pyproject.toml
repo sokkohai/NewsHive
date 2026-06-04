@@ -19,7 +19,6 @@ dependencies = [
     "playwright>=1.40.0",
     "selenium>=4.15.0",
     "chromedriver-autoinstaller>=0.6.0",
-    "O365>=2.0.0",
     "textual>=0.50.0",
     "rich>=13.0.0",
     "python-dotenv>=1.0.0",

@@ -23,7 +23,6 @@ def mock_config():
                 categories=["ESG", "CCCI"],
             )
         ],
-        email_folders=[],
         categories=[
             Category(name="ESG", keywords=["sustainability", "ESG", "carbon", "emissions"]),
             Category(name="CCCI", keywords=["investigation", "compliance", "DOJ", "corruption"]),

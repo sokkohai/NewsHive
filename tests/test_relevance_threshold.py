@@ -32,7 +32,6 @@ class TestRelevanceThresholdConfig(unittest.TestCase):
             "web_sources": [
                 {"url": "https://example.com", "categories": ["CCCI"]}
             ],
-            "email_folders": [],
             "categories": [{"name": "CCCI", "keywords": []}],
         }
         json.dump(config_data, self.temp_config_file)
@@ -106,7 +105,6 @@ class TestApplyMinimumProcessedFallback(unittest.TestCase):
             "web_sources": [
                 {"url": "https://example.com", "categories": ["CCCI"]}
             ],
-            "email_folders": [],
             "categories": [{"name": "CCCI", "keywords": []}],
         }
         json.dump(config_data, self.temp_config_file)
@@ -353,7 +351,6 @@ class TestRelevanceThresholdIntegration(unittest.TestCase):
             "web_sources": [
                 {"url": "https://example.com", "categories": ["CCCI"]}
             ],
-            "email_folders": [],
             "categories": [{"name": "CCCI", "keywords": []}],
         }
         json.dump(config_data, self.temp_config_file)

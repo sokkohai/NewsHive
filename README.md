@@ -1,10 +1,10 @@
 # NewsHive
 
-News discovery and enrichment pipeline. Scrapes web sources and email folders, extracts article content, and generates AI-powered German summaries with relevance scoring.
+News discovery and enrichment pipeline. Scrapes web sources, extracts article content, and generates AI-powered German summaries with relevance scoring.
 
 ## Features
 
-- **Discovery**: Scrapes configured web sources and Outlook email folders for new articles
+- **Discovery**: Scrapes configured web sources for new articles
 - **Deduplication**: Tracks processed items via a local state store — no duplicates
 - **Extraction**: Full article content retrieval with Playwright/Selenium support
 - **Summarization**: LLM-generated German summaries (OpenAI, Anthropic, or custom endpoint)
